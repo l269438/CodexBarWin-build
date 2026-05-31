@@ -5,8 +5,6 @@ import {
   ArrowLeftRight,
   Box,
   CheckCircle2,
-  ChevronDown,
-  ExternalLink,
   Folder,
   KeyRound,
   MoreHorizontal,
@@ -14,7 +12,6 @@ import {
   Power,
   RefreshCw,
   Save,
-  Settings,
   Shield,
   Trash2,
 } from "lucide-react";
@@ -82,6 +79,8 @@ interface AccountUsageSnapshot {
   weeklyPercent: number | null;
   status: "refreshing" | "ready" | "unavailable";
 }
+
+type Workspace = "accounts" | "api";
 
 const emptyProvider = (): Provider => ({
   id: crypto.randomUUID(),
@@ -242,9 +241,9 @@ function formatUsagePercent(value: number | null) {
 }
 
 function usageLabel(usage: AccountUsageSnapshot | undefined) {
-  if (!usage || usage.status === "refreshing") return "Usage refreshing";
-  if (usage.status === "unavailable") return "Usage unavailable";
-  return `Session ${formatUsagePercent(usage.sessionPercent)} · Weekly ${formatUsagePercent(
+  if (!usage || usage.status === "refreshing") return "用量刷新中";
+  if (usage.status === "unavailable") return "用量暂不可用";
+  return `会话 ${formatUsagePercent(usage.sessionPercent)} · 每周 ${formatUsagePercent(
     usage.weeklyPercent,
   )}`;
 }
@@ -258,11 +257,20 @@ function accountInitial(email: string) {
   return email.trim().slice(0, 1).toUpperCase() || "A";
 }
 
+function formatWorkspaceLabel(label: string | null | undefined) {
+  const normalized = label?.trim();
+  if (!normalized) return "托管目录";
+  if (normalized === "Personal") return "个人";
+  if (normalized === "Work") return "工作";
+  return normalized;
+}
+
 function App() {
   const [config, setConfig] = React.useState<AppConfig | null>(null);
   const [status, setStatus] = React.useState<ProxyStatus | null>(null);
   const [accounts, setAccounts] = React.useState<CodexVisibleAccountProjection | null>(null);
   const [accountUsage, setAccountUsage] = React.useState<Record<string, AccountUsageSnapshot>>({});
+  const [activeWorkspace, setActiveWorkspace] = React.useState<Workspace>("accounts");
   const [selectedId, setSelectedId] = React.useState<string>("");
   const [draft, setDraft] = React.useState<Provider | null>(null);
   const [busy, setBusy] = React.useState(false);
@@ -387,12 +395,12 @@ function App() {
 
   function validateDraftProvider(provider: Provider) {
     const missing = [
-      !provider.name.trim() ? "name" : "",
-      !provider.baseUrl.trim() ? "base URL" : "",
-      !provider.model.trim() ? "model" : "",
+      !provider.name.trim() ? "服务商名称" : "",
+      !provider.baseUrl.trim() ? "接口地址" : "",
+      !provider.model.trim() ? "模型" : "",
     ].filter(Boolean);
     if (missing.length) {
-      setMessage(`Fill provider ${missing.join(", ")} before saving`);
+      setMessage(`保存前请填写：${missing.join("、")}`);
       return false;
     }
     return true;
@@ -403,7 +411,7 @@ function App() {
     if (!validateDraftProvider(draft)) return;
     const next = await run(
       () => callCommand<AppConfig>("save_provider", { provider: draft }),
-      "Provider saved",
+      "服务商已保存",
     );
     setConfig(next);
     setSelectedId(draft.id);
@@ -416,14 +424,14 @@ function App() {
     if (!config?.providers.some((item) => item.id === draft.id)) {
       const saved = await run(
         () => callCommand<AppConfig>("save_provider", { provider: draft }),
-        "Provider saved",
+        "服务商已保存",
       );
       setConfig(saved);
       provider = saved.providers.find((item) => item.id === draft.id) ?? draft;
     }
     const next = await run(
       () => callCommand<AppConfig>("switch_provider", { id: provider.id }),
-      "Current provider switched",
+      "当前服务商已切换",
     );
     setConfig(next);
     await load();
@@ -431,12 +439,12 @@ function App() {
 
   async function startProxy() {
     if (!currentProvider) {
-      setMessage("Add and select a provider before starting the proxy");
+      setMessage("请先添加并选择一个服务商");
       return;
     }
     const next = await run(
       () => callCommand<ProxyStatus>("start_proxy"),
-      "Local Codex proxy is running",
+      "本地 Codex 代理已启动",
     );
     setStatus(next);
   }
@@ -444,7 +452,7 @@ function App() {
   async function stopProxy() {
     const next = await run(
       () => callCommand<ProxyStatus>("stop_proxy"),
-      "Local Codex proxy stopped; original config restored",
+      "本地 Codex 代理已停止，原配置已恢复",
     );
     setStatus(next);
   }
@@ -454,12 +462,12 @@ function App() {
     if (!config?.providers.some((provider) => provider.id === draft.id)) {
       setDraft(null);
       setSelectedId(config?.currentProviderId || config?.providers[0]?.id || "");
-      setMessage("Draft provider discarded");
+      setMessage("草稿已丢弃");
       return;
     }
     const next = await run(
       () => callCommand<AppConfig>("delete_provider", { id: draft.id }),
-      "Provider deleted",
+      "服务商已删除",
     );
     setConfig(next);
     const nextId = next.currentProviderId || next.providers[0]?.id || "";
@@ -469,7 +477,7 @@ function App() {
   async function importCurrentAccount() {
     const next = await runAccount(
       () => callCommand<CodexVisibleAccountProjection>("import_current_account"),
-      "Current Codex account imported",
+      "当前 Codex 账号已导入",
     );
     setAccounts(next);
   }
@@ -477,7 +485,7 @@ function App() {
   async function addManagedAccount() {
     const next = await runAccount(
       () => callCommand<CodexVisibleAccountProjection>("add_managed_account"),
-      "Managed Codex account added",
+      "托管 Codex 账号已添加",
     );
     setAccounts(next);
   }
@@ -485,7 +493,7 @@ function App() {
   async function switchAccount(accountId: string) {
     await runAccount(
       () => callCommand<void>("switch_account", { accountId }),
-      "Codex account switched",
+      "Codex 账号已切换",
     );
     await load();
   }
@@ -493,7 +501,7 @@ function App() {
   async function removeManagedAccount(accountId: string) {
     const next = await runAccount(
       () => callCommand<CodexVisibleAccountProjection>("remove_managed_account", { accountId }),
-      "Managed Codex account removed",
+      "托管账号已移除",
     );
     setAccounts(next);
   }
@@ -501,7 +509,7 @@ function App() {
   async function refreshManagedAccount(accountId: string) {
     const next = await runAccount(
       () => callCommand<CodexVisibleAccountProjection>("refresh_managed_account", { accountId }),
-      "Managed Codex account refreshed from live auth",
+      "托管账号已从当前登录刷新",
     );
     setAccounts(next);
   }
@@ -510,7 +518,6 @@ function App() {
     const provider = emptyProvider();
     setSelectedId(provider.id);
     setDraft(provider);
-    window.setTimeout(openAdvancedDetails, 0);
   }
 
   async function useProvider(provider: Provider) {
@@ -518,7 +525,7 @@ function App() {
     setDraft(provider);
     const switched = await run(
       () => callCommand<AppConfig>("switch_provider", { id: provider.id }),
-      "Current provider switched",
+      "当前服务商已切换",
     );
     setConfig(switched);
     if (status?.running) {
@@ -528,14 +535,7 @@ function App() {
   }
 
   async function openCodexHome() {
-    await runAccount(() => callCommand<void>("open_codex_home"), "Codex home opened");
-  }
-
-  function openAdvancedDetails() {
-    const details = document.querySelector<HTMLDetailsElement>(".advanced-row");
-    if (!details) return;
-    details.open = true;
-    details.scrollIntoView({ behavior: "smooth", block: "center" });
+    await runAccount(() => callCommand<void>("open_codex_home"), "Codex 目录已打开");
   }
 
   const currentProvider = config?.providers.find(
@@ -547,6 +547,13 @@ function App() {
   const draftIsSaved = Boolean(
     draft && config?.providers.some((provider) => provider.id === draft.id),
   );
+  const providerCount = config?.providers.length ?? 0;
+  const accountCount = accounts?.accounts.length ?? 0;
+  const managedCount = accounts?.accounts.filter((account) => !account.isLive).length ?? 0;
+  const displayedProviders = config?.providers.slice(0, 3) ?? [];
+  const displayedAccounts = accounts?.accounts.slice(0, 3) ?? [];
+  const currentRouteLabel =
+    (draft ?? currentProvider)?.apiFormat === "open_ai_chat" ? "聊天转换" : "响应直连";
 
   return (
     <main className="app-shell">
@@ -556,177 +563,241 @@ function App() {
             <div className="brand-mark">CP</div>
             <div className="brand-copy">
               <h1>CodexPilot</h1>
-              <p>Provider control</p>
+              <p>{status?.running ? "代理运行中" : "单层控制台"}</p>
             </div>
           </div>
-          <button
-            className="header-refresh"
-            disabled={busy}
-            onClick={() => void load()}
-            title="Refresh"
-            type="button"
-          >
-            <RefreshCw size={28} />
-          </button>
+          <div className="status-stack">
+            <strong>{status?.running ? "ON" : "OFF"}</strong>
+            <span>{providerCount} API · {managedCount} 账号</span>
+          </div>
         </header>
 
-        <section className="hero-card">
-          <div className="hero-provider">
-            <div className={`hero-logo ${providerKind(currentProvider?.name ?? "")}`}>
-              {providerDisplayIcon(currentProvider?.name ?? "P")}
-              {currentProvider ? <span /> : null}
-            </div>
-            <div>
-              <p>Active provider</p>
-              <h2>{currentProvider?.name ?? "No provider"}</h2>
-              <div className={`run-pill ${status?.running ? "on" : ""}`}>
+        <nav className="workspace-switcher" aria-label="工作区" role="tablist">
+          <button
+            aria-selected={activeWorkspace === "accounts"}
+            className={activeWorkspace === "accounts" ? "active" : ""}
+            onClick={() => setActiveWorkspace("accounts")}
+            role="tab"
+            type="button"
+          >
+            账号管理
+          </button>
+          <button
+            aria-selected={activeWorkspace === "api"}
+            className={activeWorkspace === "api" ? "active" : ""}
+            onClick={() => setActiveWorkspace("api")}
+            role="tab"
+            type="button"
+          >
+            接入 API
+          </button>
+        </nav>
+
+        {activeWorkspace === "accounts" ? (
+          <section className="workspace-panel accounts-panel" aria-label="账号管理">
+            <section className="focus-strip">
+              <span className="focus-kicker">当前账号</span>
+              <strong>{activeAccount?.email ?? "未检测到 Codex 账号"}</strong>
+              <span className={`run-pill ${activeAccount ? "on" : ""}`}>
                 <span />
-                {status?.running ? "Running" : "Stopped"}
-              </div>
-            </div>
-          </div>
-
-          <div className="hero-usage">
-            <p>Account usage</p>
-            {activeAccount ? (
-              <>
-                <div className="usage-metrics">
-                  <span>Session</span>
-                  <strong>{formatUsagePercent(activeUsage?.sessionPercent ?? null)}</strong>
-                  <i />
-                  <span>Weekly</span>
-                  <strong>{formatUsagePercent(activeUsage?.weeklyPercent ?? null)}</strong>
-                </div>
-                <div className="hero-bars" aria-hidden="true">
-                  <i
-                    style={
-                      {
-                        "--usage-fill": usageFill(activeUsage?.sessionPercent ?? null),
-                      } as React.CSSProperties
-                    }
-                  />
-                  <i
-                    style={
-                      {
-                        "--usage-fill": usageFill(activeUsage?.weeklyPercent ?? null),
-                      } as React.CSSProperties
-                    }
-                  />
-                </div>
-              </>
-            ) : (
-              <p className="hero-empty">No Codex account detected</p>
-            )}
-          </div>
-
-          {status?.running ? (
-            <button className="hero-stop" disabled={busy} onClick={stopProxy} type="button">
-              <span />
-              Stop
-            </button>
-          ) : (
-            <button className="hero-stop" disabled={busy} onClick={startProxy} type="button">
-              <Power size={22} />
-              Start
-            </button>
-          )}
-        </section>
-
-        <section className="providers-block">
-          <div className="block-heading">
-            <h3>Providers</h3>
-            <button disabled={busy} onClick={addProvider} title="Add provider" type="button">
-              <Plus size={24} />
-            </button>
-          </div>
-          {config?.providers.length ? (
-            <div className="provider-table">
-              {config.providers.map((provider) => {
-                const active = provider.id === config.currentProviderId;
-                return (
-                  <button
-                    className={`provider-row ${active ? "active" : ""}`}
-                    disabled={busy}
-                    key={provider.id}
-                    onClick={() => void useProvider(provider)}
-                    type="button"
-                  >
-                    <span className={`provider-logo ${providerKind(provider.name)}`}>
-                      {providerDisplayIcon(provider.name)}
-                    </span>
-                    <span className="provider-copy">
-                      <strong>{provider.name || "Unnamed provider"}</strong>
-                      <small>{provider.model || provider.baseUrl}</small>
-                    </span>
-                    <span className="provider-state">
-                      {active ? <CheckCircle2 size={26} /> : <span>Use</span>}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="empty-panel">
-              <strong>No providers configured</strong>
-              <span>Add a provider to start the local Codex proxy.</span>
-              <button disabled={busy} onClick={addProvider} type="button">
-                <Plus size={18} />
-                Add provider
-              </button>
-            </div>
-          )}
-        </section>
-
-        <section className="route-block">
-          <h3>Current route</h3>
-          <div className="route-card">
-            <div>
-              <Box size={26} />
-              <span>Model</span>
-              <strong>{draft?.model ?? currentProvider?.model ?? "No model"}</strong>
-            </div>
-            <div>
-              <ArrowLeftRight size={26} />
-              <span>Mode</span>
-              <strong>
-                {draft ?? currentProvider
-                  ? (draft ?? currentProvider)?.apiFormat === "open_ai_chat"
-                    ? "Chat transform"
-                    : "Responses direct"
-                  : "No format"}
-              </strong>
-            </div>
-            <div>
-              <Shield size={26} />
-              <span>Sessions</span>
-              <strong>Preserved</strong>
-            </div>
-          </div>
-
-          <details className="advanced-row">
-            <summary>
-              <span>
-                <Settings size={29} />
-                <span>
-                  <strong>Advanced details</strong>
-                  <small>Local proxy · History mapping · Backups</small>
-                </span>
+                {activeAccount
+                  ? activeAccount.isLive
+                    ? "系统账号"
+                    : "托管账号"
+                  : "等待登录"}
               </span>
-              <ChevronDown size={24} />
-            </summary>
-            <div className="advanced-content">
+            </section>
+
+            <section className="usage-panel" aria-label="用量概览">
+              <div>
+                <span>会话</span>
+                <strong>{formatUsagePercent(activeUsage?.sessionPercent ?? null)}</strong>
+                <i
+                  style={
+                    {
+                      "--usage-fill": usageFill(activeUsage?.sessionPercent ?? null),
+                    } as React.CSSProperties
+                  }
+                />
+              </div>
+              <div>
+                <span>每周</span>
+                <strong>{formatUsagePercent(activeUsage?.weeklyPercent ?? null)}</strong>
+                <i
+                  style={
+                    {
+                      "--usage-fill": usageFill(activeUsage?.weeklyPercent ?? null),
+                    } as React.CSSProperties
+                  }
+                />
+              </div>
+            </section>
+
+            <section className="toolbar-line" aria-label="账号操作">
+              <button className="primary-button" disabled={busy} onClick={addManagedAccount} type="button">
+                <Plus size={16} />
+                添加账号
+              </button>
+              <button className="soft-button" disabled={busy} onClick={importCurrentAccount} type="button">
+                导入当前
+              </button>
+              <button className="icon-button" disabled={busy} onClick={() => void load()} title="刷新" type="button">
+                <RefreshCw size={17} />
+              </button>
+            </section>
+
+            {accounts?.hasUnreadableStore && (
+              <p className="message">托管账号存储不可读取。</p>
+            )}
+
+            <section className="compact-list account-table" aria-label="账号列表">
+              {displayedAccounts.length ? (
+                displayedAccounts.map((account) => {
+                  const usage = accountUsage[account.id];
+                  return (
+                    <div className="account-row" key={account.id}>
+                      <span className={`account-avatar ${account.isActive ? "active" : ""}`}>
+                        {accountInitial(account.email)}
+                      </span>
+                      <span className="account-copy">
+                        <strong>
+                          {account.email}
+                          {account.isActive ? <em>当前</em> : null}
+                        </strong>
+                        <small>
+                          {account.isLive ? "系统登录" : formatWorkspaceLabel(account.workspaceLabel)} · {usageLabel(usage)}
+                        </small>
+                      </span>
+                      <span className="account-menu">
+                        {!account.isActive ? (
+                          <button disabled={busy} onClick={() => switchAccount(account.id)} type="button">
+                            切换
+                          </button>
+                        ) : null}
+                        <button
+                          disabled={busy}
+                          onClick={() =>
+                            account.isLive ? importCurrentAccount() : refreshManagedAccount(account.id)
+                          }
+                          title={account.isLive ? "导入当前" : "刷新账号"}
+                          type="button"
+                        >
+                          <MoreHorizontal size={17} />
+                        </button>
+                      </span>
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="empty">还没有检测到 Codex 账号。</p>
+              )}
+            </section>
+
+            <footer className="workspace-footer">
+              <span>{accountCount > displayedAccounts.length ? `另有 ${accountCount - displayedAccounts.length} 个账号未展示` : "账号列表已就绪"}</span>
+              <button onClick={() => void openCodexHome()} type="button">
+                <Folder size={16} />
+                Codex 目录
+              </button>
+            </footer>
+            {accountMessage && <p className="message">{accountMessage}</p>}
+          </section>
+        ) : (
+          <section className="workspace-panel api-panel" aria-label="接入 API">
+            <section className="focus-strip api-focus">
+              <span className="focus-kicker">当前服务商</span>
+              <strong>{currentProvider?.name ?? "未配置服务商"}</strong>
+              <span className={`run-pill ${status?.running ? "on" : ""}`}>
+                <span />
+                {status?.running ? "代理已启动" : "代理未启动"}
+              </span>
+            </section>
+
+            <section className="api-route" aria-label="路由摘要">
+              <div>
+                <Box size={16} />
+                <span>模型</span>
+                <strong>{draft?.model || currentProvider?.model || "未填写"}</strong>
+              </div>
+              <div>
+                <ArrowLeftRight size={16} />
+                <span>模式</span>
+                <strong>{draft || currentProvider ? currentRouteLabel : "未选择"}</strong>
+              </div>
+              <div>
+                <Shield size={16} />
+                <span>会话</span>
+                <strong>保留</strong>
+              </div>
+            </section>
+
+            <section className="toolbar-line" aria-label="API 操作">
+              {status?.running ? (
+                <button className="primary-button stop-button" disabled={busy} onClick={stopProxy} type="button">
+                  <span />
+                  停止代理
+                </button>
+              ) : (
+                <button className="primary-button" disabled={busy} onClick={startProxy} type="button">
+                  <Power size={16} />
+                  启动代理
+                </button>
+              )}
+              <button className="soft-button" disabled={busy} onClick={addProvider} type="button">
+                <Plus size={16} />
+                新服务商
+              </button>
+              <button className="icon-button" disabled={busy} onClick={() => void load()} title="刷新" type="button">
+                <RefreshCw size={17} />
+              </button>
+            </section>
+
+            <section className="compact-list provider-table" aria-label="服务商列表">
+              {displayedProviders.length ? (
+                displayedProviders.map((provider) => {
+                  const active = provider.id === config?.currentProviderId;
+                  return (
+                    <button
+                      className={`provider-row ${active ? "active" : ""}`}
+                      disabled={busy}
+                      key={provider.id}
+                      onClick={() => void useProvider(provider)}
+                      type="button"
+                    >
+                      <span className={`provider-logo ${providerKind(provider.name)}`}>
+                        {providerDisplayIcon(provider.name)}
+                      </span>
+                      <span className="provider-copy">
+                        <strong>{provider.name || "未命名服务商"}</strong>
+                        <small>{provider.model || provider.baseUrl || "未填写模型"}</small>
+                      </span>
+                      <span className="provider-state">
+                        {active ? <CheckCircle2 size={20} /> : <span>启用</span>}
+                      </span>
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="empty-panel">
+                  <strong>还没有服务商</strong>
+                  <span>先添加 API 服务商，再启动本地代理。</span>
+                </div>
+              )}
+            </section>
+
+            <section className="api-editor" aria-label="服务商编辑">
               <label>
-                Provider name
+                服务商
                 <input
                   value={draft?.name ?? ""}
-                  placeholder="DeepSeek, OpenAI, Custom..."
+                  placeholder="OpenAI / DeepSeek / 自定义"
                   onChange={(event) =>
                     draft && setDraft({ ...draft, name: event.currentTarget.value })
                   }
                 />
               </label>
               <label>
-                Base URL
+                接口地址
                 <input
                   value={draft?.baseUrl ?? ""}
                   placeholder="https://api.example.com/v1"
@@ -736,13 +807,13 @@ function App() {
                 />
               </label>
               <label>
-                API Key
+                密钥
                 <span className="input-icon">
-                  <KeyRound size={17} />
+                  <KeyRound size={15} />
                   <input
                     type="password"
                     value={draft?.apiKey ?? ""}
-                    placeholder="API key"
+                    placeholder="请输入密钥"
                     onChange={(event) =>
                       draft && setDraft({ ...draft, apiKey: event.currentTarget.value })
                     }
@@ -750,17 +821,17 @@ function App() {
                 </span>
               </label>
               <label>
-                Model
+                模型
                 <input
                   value={draft?.model ?? ""}
-                  placeholder="model name"
+                  placeholder="模型名称"
                   onChange={(event) =>
                     draft && setDraft({ ...draft, model: event.currentTarget.value })
                   }
                 />
               </label>
               <label>
-                API format
+                格式
                 <select
                   value={draft?.apiFormat ?? "open_ai_responses"}
                   onChange={(event) =>
@@ -768,18 +839,21 @@ function App() {
                     setDraft({ ...draft, apiFormat: event.currentTarget.value as ApiFormat })
                   }
                 >
-                  <option value="open_ai_responses">Responses direct</option>
-                  <option value="open_ai_chat">Chat transform</option>
+                  <option value="open_ai_responses">响应直连</option>
+                  <option value="open_ai_chat">聊天转换</option>
                 </select>
               </label>
-              <span className="proxy-line">Local proxy: {routeUrl}</span>
-              <div className="advanced-actions">
-                <button className="primary-button" disabled={busy || !draft} onClick={saveDraft} type="button">
-                  <Save size={16} />
-                  Save
+            </section>
+
+            <footer className="workspace-footer">
+              <span>{routeUrl}</span>
+              <div className="footer-actions">
+                <button disabled={busy || !draft} onClick={saveDraft} type="button">
+                  <Save size={15} />
+                  保存
                 </button>
-                <button className="soft-button" disabled={busy || !draft} onClick={switchToSelected} type="button">
-                  Use provider
+                <button disabled={busy || !draft} onClick={switchToSelected} type="button">
+                  启用
                 </button>
                 <button
                   className="danger-button"
@@ -789,105 +863,16 @@ function App() {
                     (draftIsSaved && (config?.providers.length ?? 0) <= 1)
                   }
                   onClick={deleteSelected}
-                  title={draftIsSaved ? "Delete provider" : "Discard draft"}
+                  title={draftIsSaved ? "删除服务商" : "丢弃草稿"}
                   type="button"
                 >
-                  <Trash2 size={16} />
+                  <Trash2 size={15} />
                 </button>
               </div>
-            </div>
-          </details>
-          {message && <p className="message">{message}</p>}
-        </section>
-
-        <section className="accounts-block">
-          <div className="block-heading">
-            <h3>Accounts</h3>
-            <button disabled={busy} onClick={addManagedAccount} title="Add login" type="button">
-              <Plus size={24} />
-            </button>
-          </div>
-
-          {accounts?.hasUnreadableStore && (
-            <p className="message">Managed account store is unreadable.</p>
-          )}
-
-          <div className="account-table">
-            {accounts?.accounts.length ? (
-              accounts.accounts.map((account) => {
-                const usage = accountUsage[account.id];
-                return (
-                  <div className="account-row" key={account.id}>
-                    <span className={`account-avatar ${account.isActive ? "active" : ""}`}>
-                      {accountInitial(account.email)}
-                    </span>
-                    <span className="account-copy">
-                      <strong>
-                        {account.email}
-                        {account.isActive ? <em>Active</em> : null}
-                      </strong>
-                      <small>{account.isLive ? "Live system account" : "Managed home"}</small>
-                    </span>
-                    <span className="account-meter">
-                      <span>Session {formatUsagePercent(usage?.sessionPercent ?? null)}</span>
-                      <i
-                        style={
-                          {
-                            "--usage-fill": usageFill(usage?.sessionPercent ?? null),
-                          } as React.CSSProperties
-                        }
-                      />
-                    </span>
-                    <span className="account-meter">
-                      <span>Weekly {formatUsagePercent(usage?.weeklyPercent ?? null)}</span>
-                      <i
-                        style={
-                          {
-                            "--usage-fill": usageFill(usage?.weeklyPercent ?? null),
-                          } as React.CSSProperties
-                        }
-                      />
-                    </span>
-                    <span className="account-menu">
-                      {!account.isActive ? (
-                        <button disabled={busy} onClick={() => switchAccount(account.id)} type="button">
-                          Switch
-                        </button>
-                      ) : null}
-                      <button
-                        disabled={busy}
-                        onClick={() =>
-                          account.isLive ? importCurrentAccount() : refreshManagedAccount(account.id)
-                        }
-                        title={account.isLive ? "Import current" : "Refresh account"}
-                        type="button"
-                      >
-                        <MoreHorizontal size={24} />
-                      </button>
-                    </span>
-                  </div>
-                );
-              })
-            ) : (
-              <p className="empty">No Codex accounts detected.</p>
-            )}
-          </div>
-          {accountMessage && <p className="message">{accountMessage}</p>}
-        </section>
-
-        <footer className="pilot-footer">
-          <button onClick={() => void openCodexHome()} title="Open Codex Home" type="button">
-            <Folder size={25} />
-            <span>Open Codex Home</span>
-          </button>
-          <button onClick={openAdvancedDetails} title="Settings" type="button">
-            <Settings size={25} />
-            <span>Settings</span>
-          </button>
-          <button onClick={() => void openCodexHome()} type="button" title="Open Codex Home">
-            <ExternalLink size={25} />
-          </button>
-        </footer>
+            </footer>
+            {message && <p className="message">{message}</p>}
+          </section>
+        )}
       </section>
     </main>
   );
