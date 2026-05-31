@@ -20,6 +20,13 @@ use codex_api_switcher::{
 use serde_json::json;
 
 #[test]
+fn windows_release_build_uses_gui_subsystem() {
+    let main_rs = include_str!("../src/main.rs");
+
+    assert!(main_rs.contains("windows_subsystem = \"windows\""));
+}
+
+#[test]
 fn takeover_config_points_codex_to_local_responses_proxy() {
     let config = build_takeover_config(15721, "deepseek-v4-flash");
 
