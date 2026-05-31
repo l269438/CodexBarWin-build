@@ -1,4 +1,5 @@
 use std::{
+    env,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -448,12 +449,125 @@ pub fn sync_auth_file(source_home: &Path, target_home: &Path) -> Result<(), Stri
 }
 
 fn spawn_codex_login(home_path: &Path) -> Result<std::process::Child, std::io::Error> {
-    Command::new("codex")
+    let binary = resolve_codex_binary().unwrap_or_else(|| PathBuf::from("codex"));
+    Command::new(binary)
         .arg("login")
         .env("CODEX_HOME", home_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+}
+
+fn resolve_codex_binary() -> Option<PathBuf> {
+    if let Ok(path) = env::var("CODEX_CLI_PATH") {
+        let candidate = PathBuf::from(path);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let path_env = env::var("PATH").ok();
+    resolve_codex_binary_from_path(path_env.as_deref(), dirs::home_dir().as_deref())
+        .or_else(resolve_codex_binary_from_login_shell)
+}
+
+pub fn resolve_codex_binary_from_path(
+    path_env: Option<&str>,
+    home_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(path_env) = path_env {
+        for dir in env::split_paths(path_env) {
+            push_codex_names(&mut candidates, dir);
+        }
+    }
+
+    if let Some(home_dir) = home_dir {
+        push_codex_names(&mut candidates, home_dir.join(".local").join("bin"));
+        push_codex_names(&mut candidates, home_dir.join(".npm-global").join("bin"));
+        push_codex_names(&mut candidates, home_dir.join(".pnpm-global").join("bin"));
+        push_codex_names(&mut candidates, home_dir.join(".bun").join("bin"));
+        push_codex_names(&mut candidates, home_dir.join(".volta").join("bin"));
+        push_codex_names(&mut candidates, home_dir.join("Library").join("pnpm"));
+
+        let nvm_versions = home_dir
+            .join(".nvm")
+            .join("versions")
+            .join("node");
+        if let Ok(entries) = fs::read_dir(nvm_versions) {
+            let mut version_dirs: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect();
+            version_dirs.sort_by(|left, right| right.cmp(left));
+            for version_dir in version_dirs {
+                push_codex_names(&mut candidates, version_dir.join("bin"));
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            push_codex_names(
+                &mut candidates,
+                home_dir
+                    .join("AppData")
+                    .join("Roaming")
+                    .join("npm"),
+            );
+        }
+    }
+
+    push_codex_names(&mut candidates, PathBuf::from("/opt/homebrew/bin"));
+    push_codex_names(&mut candidates, PathBuf::from("/usr/local/bin"));
+    push_codex_names(&mut candidates, PathBuf::from("/usr/bin"));
+
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+fn push_codex_names(candidates: &mut Vec<PathBuf>, dir: PathBuf) {
+    for name in codex_binary_names() {
+        candidates.push(dir.join(name));
+    }
+}
+
+fn codex_binary_names() -> &'static [&'static str] {
+    #[cfg(target_os = "windows")]
+    {
+        &["codex.exe", "codex.cmd", "codex.bat", "codex"]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        &["codex"]
+    }
+}
+
+fn resolve_codex_binary_from_login_shell() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        return None;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let output = Command::new(shell)
+            .arg("-lc")
+            .arg("command -v codex")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(PathBuf::from)?;
+        path.is_file().then_some(path)
+    }
 }
 
 #[derive(Debug, Clone)]

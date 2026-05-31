@@ -3,6 +3,7 @@ use codex_api_switcher::{
     accounts::{
         CodexActiveSource, CodexHomeTransaction, ManagedCodexAccount, ManagedCodexAccountSet,
         ObservedSystemCodexAccount, default_managed_homes_root_for, discover_account_in_home,
+        resolve_codex_binary_from_path,
     },
     codex_live::{
         build_takeover_config, restore_original_config, switcher_backup_path, write_takeover_config,
@@ -236,6 +237,25 @@ fn discover_account_in_home_reads_chatgpt_auth() {
 
     assert_eq!(account.email, "user@example.com");
     assert_eq!(account.workspace_account_id.as_deref(), Some("acct_1"));
+}
+
+#[test]
+fn codex_binary_resolution_finds_nvm_install_when_desktop_path_is_minimal() {
+    let temp = tempfile::tempdir().unwrap();
+    let codex_path = temp
+        .path()
+        .join(".nvm")
+        .join("versions")
+        .join("node")
+        .join("v22.22.3")
+        .join("bin")
+        .join("codex");
+    std::fs::create_dir_all(codex_path.parent().unwrap()).unwrap();
+    std::fs::write(&codex_path, "#!/bin/sh\n").unwrap();
+
+    let resolved = resolve_codex_binary_from_path(Some("/usr/bin:/bin"), Some(temp.path()));
+
+    assert_eq!(resolved.as_deref(), Some(codex_path.as_path()));
 }
 
 #[test]
