@@ -1,0 +1,562 @@
+use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
+use serde_json::{Value, json};
+use tokio::sync::{RwLock, oneshot};
+
+use crate::{
+    history::ConversationHistoryStore,
+    store::{ApiFormat, AppConfig, Provider},
+    transform::{
+        CodexChatReasoning, chat_completion_to_response, chat_usage_to_responses_usage,
+        extract_reasoning_text, response_id_from_chat_id, response_status_from_finish_reason,
+        responses_to_chat_completions,
+    },
+};
+
+#[derive(Clone)]
+struct ProxyRuntime {
+    config: Arc<RwLock<AppConfig>>,
+    history: Arc<ConversationHistoryStore>,
+    client: reqwest::Client,
+}
+
+pub struct ProxyHandle {
+    stop_tx: Option<oneshot::Sender<()>>,
+}
+
+impl ProxyHandle {
+    pub fn stop(mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+pub async fn start_proxy(
+    port: u16,
+    config: Arc<RwLock<AppConfig>>,
+    history: Arc<ConversationHistoryStore>,
+) -> anyhow::Result<ProxyHandle> {
+    let runtime = ProxyRuntime {
+        config,
+        history,
+        client: reqwest::Client::new(),
+    };
+    let app = Router::new()
+        .route("/responses", post(handle_responses))
+        .route("/v1/responses", post(handle_responses))
+        .route("/responses/compact", post(handle_responses))
+        .route("/v1/responses/compact", post(handle_responses))
+        .with_state(runtime);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        let result = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = stop_rx.await;
+            })
+            .await;
+        if let Err(err) = result {
+            eprintln!("proxy stopped with error: {err}");
+        }
+    });
+
+    Ok(ProxyHandle {
+        stop_tx: Some(stop_tx),
+    })
+}
+
+async fn handle_responses(
+    State(runtime): State<ProxyRuntime>,
+    Json(body): Json<Value>,
+) -> Response {
+    match forward_codex_request(runtime, body).await {
+        Ok(response) => response,
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": {
+                    "message": err.to_string(),
+                    "type": "proxy_error"
+                }
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn forward_codex_request(runtime: ProxyRuntime, body: Value) -> anyhow::Result<Response> {
+    let provider = {
+        let config = runtime.config.read().await;
+        config
+            .current_provider()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no current provider selected"))?
+    };
+
+    match provider.api_format {
+        ApiFormat::OpenAiChat => forward_to_chat_provider(runtime, provider, body).await,
+        ApiFormat::OpenAiResponses => forward_to_responses_provider(runtime, provider, body).await,
+    }
+}
+
+async fn forward_to_responses_provider(
+    runtime: ProxyRuntime,
+    provider: Provider,
+    body: Value,
+) -> anyhow::Result<Response> {
+    let url = responses_url(&provider.base_url);
+    let upstream = runtime
+        .client
+        .post(url)
+        .bearer_auth(provider.api_key)
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = upstream.status();
+    if !status.is_success() {
+        let text = upstream.text().await.unwrap_or_default();
+        return Ok((
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(json!({ "error": { "message": text, "type": "upstream_error" } })),
+        )
+            .into_response());
+    }
+
+    let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK);
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+
+    if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+        return Ok(builder.body(Body::from_stream(upstream.bytes_stream()))?);
+    }
+
+    Ok(builder.body(Body::from(upstream.bytes().await?))?)
+}
+
+async fn forward_to_chat_provider(
+    runtime: ProxyRuntime,
+    provider: Provider,
+    body: Value,
+) -> anyhow::Result<Response> {
+    let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let mut request_body = responses_to_chat_completions(
+        body.clone(),
+        Some(&provider.model),
+        Some(&CodexChatReasoning::deepseek()),
+    )?;
+    runtime
+        .history
+        .enrich_chat_request(&body, &mut request_body)
+        .await;
+    let request_messages = request_body
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let url = chat_completions_url(&provider.base_url);
+    let upstream = runtime
+        .client
+        .post(url)
+        .bearer_auth(provider.api_key)
+        .json(&request_body)
+        .send()
+        .await?;
+
+    let status = upstream.status();
+    if !status.is_success() {
+        let text = upstream.text().await.unwrap_or_default();
+        return Ok((
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(json!({ "error": { "message": text, "type": "upstream_error" } })),
+        )
+            .into_response());
+    }
+
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if is_stream || content_type.contains("text/event-stream") {
+        let stream = chat_sse_to_responses_sse(
+            upstream.bytes_stream(),
+            runtime.history.clone(),
+            request_messages,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+        headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+        return Ok((headers, Body::from_stream(stream)).into_response());
+    }
+
+    let chat_response: Value = upstream.json().await?;
+    let responses_response = chat_completion_to_response(chat_response.clone())?;
+    runtime
+        .history
+        .record_chat_response(request_messages, &chat_response)
+        .await?;
+    Ok(Json(responses_response).into_response())
+}
+
+pub fn chat_completions_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        trimmed.to_string()
+    } else if trimmed.ends_with("/v1") {
+        format!("{trimmed}/chat/completions")
+    } else {
+        format!("{trimmed}/v1/chat/completions")
+    }
+}
+
+pub fn responses_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/responses") {
+        trimmed.to_string()
+    } else if trimmed.ends_with("/v1") {
+        format!("{trimmed}/responses")
+    } else {
+        format!("{trimmed}/v1/responses")
+    }
+}
+
+#[derive(Default)]
+struct StreamState {
+    response_started: bool,
+    response_id: String,
+    model: String,
+    created_at: u64,
+    text: String,
+    reasoning: String,
+    usage: Option<Value>,
+    finish_reason: Option<String>,
+}
+
+fn chat_sse_to_responses_sse(
+    stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    history: Arc<ConversationHistoryStore>,
+    request_messages: Vec<Value>,
+) -> impl Stream<Item = Result<Bytes, Infallible>> + Send {
+    async_stream::stream! {
+        let mut buffer = String::new();
+        let mut state = StreamState {
+            response_id: "resp_codex_api_switcher".to_string(),
+            ..Default::default()
+        };
+        tokio::pin!(stream);
+
+        while let Some(item) = stream.next().await {
+            let Ok(bytes) = item else {
+                yield Ok(sse_event("response.failed", json!({
+                    "type": "response.failed",
+                    "response": base_response(&state, "failed", vec![])
+                })));
+                return;
+            };
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(block) = take_sse_block(&mut buffer) {
+                let data = sse_data(&block);
+                if data.trim().is_empty() {
+                    continue;
+                }
+                if data.trim() == "[DONE]" {
+                    history.record_stream_response(
+                        &state.response_id,
+                        request_messages.clone(),
+                        &state.text,
+                        &state.reasoning,
+                    ).await;
+                    for event in finalize_stream(&mut state) {
+                        yield Ok(event);
+                    }
+                    return;
+                }
+                let Ok(chunk) = serde_json::from_str::<Value>(&data) else {
+                    continue;
+                };
+                for event in handle_chat_chunk(&mut state, &chunk) {
+                    yield Ok(event);
+                }
+            }
+        }
+        history.record_stream_response(
+            &state.response_id,
+            request_messages,
+            &state.text,
+            &state.reasoning,
+        ).await;
+        for event in finalize_stream(&mut state) {
+            yield Ok(event);
+        }
+    }
+}
+
+fn handle_chat_chunk(state: &mut StreamState, chunk: &Value) -> Vec<Bytes> {
+    let mut events = Vec::new();
+    if let Some(id) = chunk.get("id").and_then(Value::as_str) {
+        state.response_id = response_id_from_chat_id(Some(id));
+    }
+    if let Some(model) = chunk.get("model").and_then(Value::as_str) {
+        state.model = model.to_string();
+    }
+    if let Some(created) = chunk.get("created").and_then(Value::as_u64) {
+        state.created_at = created;
+    }
+    if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
+        state.usage = Some(chat_usage_to_responses_usage(Some(usage)));
+    }
+    if !state.response_started {
+        state.response_started = true;
+        events.push(sse_event(
+            "response.created",
+            json!({
+                "type": "response.created",
+                "response": base_response(state, "in_progress", vec![])
+            }),
+        ));
+        events.push(sse_event(
+            "response.in_progress",
+            json!({
+                "type": "response.in_progress",
+                "response": base_response(state, "in_progress", vec![])
+            }),
+        ));
+    }
+
+    let Some(choice) = chunk
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+    else {
+        return events;
+    };
+    if let Some(delta) = choice.get("delta") {
+        if let Some(reasoning) = extract_reasoning_text(delta) {
+            if state.reasoning.is_empty() {
+                events.push(sse_event(
+                    "response.output_item.added",
+                    json!({
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {
+                            "id": format!("rs_{}", state.response_id),
+                            "type": "reasoning",
+                            "status": "in_progress",
+                            "summary": []
+                        }
+                    }),
+                ));
+                events.push(sse_event(
+                    "response.reasoning_summary_part.added",
+                    json!({
+                        "type": "response.reasoning_summary_part.added",
+                        "item_id": format!("rs_{}", state.response_id),
+                        "output_index": 0,
+                        "summary_index": 0,
+                        "part": {"type": "summary_text", "text": ""}
+                    }),
+                ));
+            }
+            state.reasoning.push_str(&reasoning);
+            events.push(sse_event(
+                "response.reasoning_summary_text.delta",
+                json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": format!("rs_{}", state.response_id),
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "delta": reasoning
+                }),
+            ));
+        }
+        if let Some(content) = delta.get("content").and_then(Value::as_str) {
+            if !content.is_empty() {
+                if state.text.is_empty() {
+                    events.push(sse_event(
+                        "response.output_item.added",
+                        json!({
+                            "type": "response.output_item.added",
+                            "output_index": if state.reasoning.is_empty() { 0 } else { 1 },
+                            "item": {
+                                "id": format!("{}_msg", state.response_id),
+                                "type": "message",
+                                "status": "in_progress",
+                                "role": "assistant",
+                                "content": []
+                            }
+                        }),
+                    ));
+                    events.push(sse_event(
+                        "response.content_part.added",
+                        json!({
+                            "type": "response.content_part.added",
+                            "item_id": format!("{}_msg", state.response_id),
+                            "output_index": if state.reasoning.is_empty() { 0 } else { 1 },
+                            "content_index": 0,
+                            "part": {"type": "output_text", "text": "", "annotations": []}
+                        }),
+                    ));
+                }
+                state.text.push_str(content);
+                events.push(sse_event(
+                    "response.output_text.delta",
+                    json!({
+                        "type": "response.output_text.delta",
+                        "item_id": format!("{}_msg", state.response_id),
+                        "output_index": if state.reasoning.is_empty() { 0 } else { 1 },
+                        "content_index": 0,
+                        "delta": content
+                    }),
+                ));
+            }
+        }
+    }
+    if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+        state.finish_reason = Some(reason.to_string());
+    }
+    events
+}
+
+fn finalize_stream(state: &mut StreamState) -> Vec<Bytes> {
+    let mut events = Vec::new();
+    let mut output = Vec::new();
+    if !state.reasoning.is_empty() {
+        let item = json!({
+            "id": format!("rs_{}", state.response_id),
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": state.reasoning}]
+        });
+        output.push(item.clone());
+        events.push(sse_event(
+            "response.reasoning_summary_text.done",
+            json!({
+                "type": "response.reasoning_summary_text.done",
+                "item_id": format!("rs_{}", state.response_id),
+                "output_index": 0,
+                "summary_index": 0,
+                "text": state.reasoning
+            }),
+        ));
+        events.push(sse_event(
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": item
+            }),
+        ));
+    }
+    if !state.text.is_empty() {
+        let output_index = if state.reasoning.is_empty() { 0 } else { 1 };
+        let item = json!({
+            "id": format!("{}_msg", state.response_id),
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": state.text, "annotations": []}]
+        });
+        output.push(item.clone());
+        events.push(sse_event(
+            "response.output_text.done",
+            json!({
+                "type": "response.output_text.done",
+                "item_id": format!("{}_msg", state.response_id),
+                "output_index": output_index,
+                "content_index": 0,
+                "text": state.text
+            }),
+        ));
+        events.push(sse_event(
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": item
+            }),
+        ));
+    }
+    events.push(sse_event(
+        "response.completed",
+        json!({
+            "type": "response.completed",
+            "response": base_response(
+                state,
+                response_status_from_finish_reason(state.finish_reason.as_deref()),
+                output,
+            )
+        }),
+    ));
+    events
+}
+
+fn base_response(state: &StreamState, status: &str, output: Vec<Value>) -> Value {
+    json!({
+        "id": state.response_id,
+        "object": "response",
+        "created_at": state.created_at,
+        "status": status,
+        "model": state.model,
+        "output": output,
+        "usage": state.usage.clone().unwrap_or_else(|| json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+        }))
+    })
+}
+
+fn take_sse_block(buffer: &mut String) -> Option<String> {
+    if let Some(index) = buffer.find("\n\n") {
+        let block = buffer[..index].to_string();
+        buffer.drain(..index + 2);
+        return Some(block);
+    }
+    if let Some(index) = buffer.find("\r\n\r\n") {
+        let block = buffer[..index].to_string();
+        buffer.drain(..index + 4);
+        return Some(block);
+    }
+    None
+}
+
+fn sse_data(block: &str) -> String {
+    block
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sse_event(event: &str, data: Value) -> Bytes {
+    Bytes::from(format!(
+        "event: {event}\ndata: {}\n\n",
+        serde_json::to_string(&data).unwrap_or_default()
+    ))
+}

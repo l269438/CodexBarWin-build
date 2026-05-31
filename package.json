@@ -1,0 +1,28 @@
+{
+  "name": "codex-api-switcher",
+  "version": "0.1.0",
+  "description": "A compact Codex provider and account controller.",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:renderer": "vite --host 127.0.0.1 --port 1420",
+    "build": "tauri build",
+    "build:renderer": "vite build",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.0",
+    "lucide-react": "^0.562.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
+  },
+  "packageManager": "pnpm@10.33.0"
+}
