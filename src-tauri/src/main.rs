@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use codex_api_switcher::{
     AppConfig, AppState, ProxyStatus, accounts::CodexVisibleAccountProjection, store::Provider,
     usage::CodexUsageSummary,
