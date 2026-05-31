@@ -93,6 +93,7 @@ impl AppState {
         codex_live::write_takeover_config(
             &codex_live::default_codex_dir(),
             config.proxy_port,
+            &provider.name,
             &provider.model,
         )
         .map_err(|e| e.to_string())
@@ -167,7 +168,9 @@ impl AppState {
         let active_source = self.active_source.read().await.clone();
         let stored_accounts =
             if usage::usage_request_needs_managed_store(account_id.as_deref(), &active_source) {
-                FileManagedCodexAccountStore::default().load_accounts()?.accounts
+                FileManagedCodexAccountStore::default()
+                    .load_accounts()?
+                    .accounts
             } else {
                 Vec::new()
             };

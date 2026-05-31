@@ -21,12 +21,13 @@ use serde_json::json;
 
 #[test]
 fn takeover_config_points_codex_to_local_responses_proxy() {
-    let config = build_takeover_config(15721, "deepseek-v4-flash");
+    let config = build_takeover_config(15721, "DeepSeek", "deepseek-v4-flash");
 
     assert!(config.contains("base_url = \"http://127.0.0.1:15721/v1\""));
     assert!(config.contains("wire_api = \"responses\""));
     assert!(config.contains("experimental_bearer_token = \"PROXY_MANAGED\""));
     assert!(config.contains("model = \"deepseek-v4-flash\""));
+    assert!(config.contains("name = \"DeepSeek · deepseek-v4-flash\""));
 }
 
 #[test]
@@ -389,7 +390,7 @@ fn writing_takeover_config_preserves_existing_auth_json() {
     let auth_path = codex_dir.join("auth.json");
     std::fs::write(&auth_path, r#"{"tokens":{"id_token":"keep-me"}}"#).unwrap();
 
-    write_takeover_config(&codex_dir, 15721, "deepseek-v4-flash").unwrap();
+    write_takeover_config(&codex_dir, 15721, "DeepSeek", "deepseek-v4-flash").unwrap();
 
     let auth = std::fs::read_to_string(auth_path).unwrap();
     assert_eq!(auth, r#"{"tokens":{"id_token":"keep-me"}}"#);
@@ -406,13 +407,14 @@ fn writing_takeover_config_backs_up_existing_config_once() {
     let backup_path = switcher_backup_path(&codex_dir);
     std::fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
 
-    write_takeover_config(&codex_dir, 15721, "deepseek-v4-flash").unwrap();
-    write_takeover_config(&codex_dir, 15721, "another-model").unwrap();
+    write_takeover_config(&codex_dir, 15721, "DeepSeek", "deepseek-v4-flash").unwrap();
+    write_takeover_config(&codex_dir, 15721, "XIAOMI", "another-model").unwrap();
 
     let backup = std::fs::read_to_string(backup_path).unwrap();
     assert_eq!(backup, "model = \"gpt-5\"\n");
     let current = std::fs::read_to_string(config_path).unwrap();
     assert!(current.contains("model = \"another-model\""));
+    assert!(current.contains("name = \"XIAOMI · another-model\""));
 }
 
 #[test]
@@ -424,7 +426,7 @@ fn restore_original_config_puts_back_backup_and_removes_backup_file() {
     let backup_path = switcher_backup_path(&codex_dir);
     std::fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
 
-    write_takeover_config(&codex_dir, 15721, "deepseek-v4-flash").unwrap();
+    write_takeover_config(&codex_dir, 15721, "DeepSeek", "deepseek-v4-flash").unwrap();
     restore_original_config(&codex_dir).unwrap();
 
     let restored = std::fs::read_to_string(config_path).unwrap();

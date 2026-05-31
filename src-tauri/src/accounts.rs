@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -491,10 +490,7 @@ pub fn resolve_codex_binary_from_path(
         push_codex_names(&mut candidates, home_dir.join(".volta").join("bin"));
         push_codex_names(&mut candidates, home_dir.join("Library").join("pnpm"));
 
-        let nvm_versions = home_dir
-            .join(".nvm")
-            .join("versions")
-            .join("node");
+        let nvm_versions = home_dir.join(".nvm").join("versions").join("node");
         if let Ok(entries) = fs::read_dir(nvm_versions) {
             let mut version_dirs: Vec<PathBuf> = entries
                 .filter_map(Result::ok)
@@ -511,10 +507,7 @@ pub fn resolve_codex_binary_from_path(
         {
             push_codex_names(
                 &mut candidates,
-                home_dir
-                    .join("AppData")
-                    .join("Roaming")
-                    .join("npm"),
+                home_dir.join("AppData").join("Roaming").join("npm"),
             );
         }
     }

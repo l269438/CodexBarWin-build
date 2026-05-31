@@ -14,13 +14,16 @@ pub fn default_codex_dir() -> PathBuf {
         .join(".codex")
 }
 
-pub fn build_takeover_config(port: u16, model: &str) -> String {
+pub fn build_takeover_config(port: u16, provider_name: &str, model: &str) -> String {
     let proxy_base_url = format!("http://127.0.0.1:{port}/v1");
-    let model = toml_string(if model.trim().is_empty() {
+    let model_value = if model.trim().is_empty() {
         "deepseek-v4-flash"
     } else {
         model.trim()
-    });
+    };
+    let display_name = provider_display_name(provider_name, model_value);
+    let model = toml_string(model_value);
+    let display_name = toml_string(&display_name);
     let proxy_base_url = toml_string(&proxy_base_url);
     let token = toml_string(PROXY_TOKEN_PLACEHOLDER);
 
@@ -32,7 +35,7 @@ model_reasoning_effort = "high"
 disable_response_storage = true
 
 [model_providers.codex-api-switcher]
-name = "Codex API Switcher"
+name = {display_name}
 base_url = {proxy_base_url}
 wire_api = "responses"
 requires_openai_auth = true
@@ -45,13 +48,27 @@ pub fn switcher_backup_path(codex_dir: &Path) -> PathBuf {
     codex_dir.join("config.toml.codex-api-switcher.bak")
 }
 
-pub fn write_takeover_config(codex_dir: &Path, port: u16, model: &str) -> anyhow::Result<()> {
+pub fn write_takeover_config(
+    codex_dir: &Path,
+    port: u16,
+    provider_name: &str,
+    model: &str,
+) -> anyhow::Result<()> {
     fs::create_dir_all(codex_dir)?;
     backup_existing_config(codex_dir)?;
-    let config = build_takeover_config(port, model);
+    let config = build_takeover_config(port, provider_name, model);
     config.parse::<toml_edit::DocumentMut>()?;
     fs::write(codex_dir.join("config.toml"), config)?;
     Ok(())
+}
+
+fn provider_display_name(provider_name: &str, model: &str) -> String {
+    let provider_name = provider_name.trim();
+    if provider_name.is_empty() {
+        model.to_string()
+    } else {
+        format!("{provider_name} · {model}")
+    }
 }
 
 pub fn restore_original_config(codex_dir: &Path) -> anyhow::Result<()> {
