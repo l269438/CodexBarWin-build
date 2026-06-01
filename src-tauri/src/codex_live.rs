@@ -5,7 +5,7 @@ use std::{
 
 use toml_edit::{DocumentMut, Item, Table, value};
 
-const OPENAI_PROVIDER_KEY: &str = "OpenAI";
+const SWITCHER_PROVIDER_KEY: &str = "codex-api-switcher";
 const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 pub fn default_codex_dir() -> PathBuf {
@@ -49,15 +49,16 @@ pub fn write_takeover_config(
     Ok(())
 }
 
-fn apply_takeover_config(doc: &mut DocumentMut, port: u16, _provider_name: &str, model: &str) {
+fn apply_takeover_config(doc: &mut DocumentMut, port: u16, provider_name: &str, model: &str) {
     let proxy_base_url = format!("http://127.0.0.1:{port}/v1");
     let model_value = if model.trim().is_empty() {
         "deepseek-v4-flash"
     } else {
         model.trim()
     };
+    let display_name = provider_display_name(provider_name, model_value);
 
-    doc["model_provider"] = value(OPENAI_PROVIDER_KEY);
+    doc["model_provider"] = value(SWITCHER_PROVIDER_KEY);
     doc["model"] = value(model_value);
     doc["model_reasoning_effort"] = value("high");
     doc["disable_response_storage"] = value(true);
@@ -66,16 +67,25 @@ fn apply_takeover_config(doc: &mut DocumentMut, port: u16, _provider_name: &str,
         doc["model_providers"] = Item::Table(Table::new());
     }
     if let Some(providers) = doc["model_providers"].as_table_like_mut() {
-        providers.remove("codex-api-switcher");
+        providers.remove("OpenAI");
     }
 
     let mut provider = Table::new();
-    provider["name"] = value("OpenAI");
+    provider["name"] = value(display_name);
     provider["base_url"] = value(proxy_base_url);
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(true);
     provider["experimental_bearer_token"] = value(PROXY_TOKEN_PLACEHOLDER);
-    doc["model_providers"][OPENAI_PROVIDER_KEY] = Item::Table(provider);
+    doc["model_providers"][SWITCHER_PROVIDER_KEY] = Item::Table(provider);
+}
+
+fn provider_display_name(provider_name: &str, model: &str) -> String {
+    let provider_name = provider_name.trim();
+    if provider_name.is_empty() {
+        model.to_string()
+    } else {
+        format!("{provider_name} · {model}")
+    }
 }
 
 pub fn restore_original_config(codex_dir: &Path) -> anyhow::Result<()> {

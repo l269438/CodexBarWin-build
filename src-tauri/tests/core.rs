@@ -31,14 +31,16 @@ fn windows_release_build_uses_gui_subsystem() {
 fn takeover_config_points_codex_to_local_responses_proxy() {
     let config = build_takeover_config(15721, "DeepSeek", "deepseek-v4-flash");
 
-    assert!(config.contains(r#"model_provider = "OpenAI""#));
-    assert!(config.contains("[model_providers.OpenAI]"));
+    assert!(config.contains(r#"model_provider = "codex-api-switcher""#));
+    assert!(config.contains("[model_providers.codex-api-switcher]"));
     assert!(config.contains("base_url = \"http://127.0.0.1:15721/v1\""));
     assert!(config.contains("wire_api = \"responses\""));
     assert!(config.contains("requires_openai_auth = true"));
     assert!(config.contains("experimental_bearer_token = \"PROXY_MANAGED\""));
     assert!(config.contains("model = \"deepseek-v4-flash\""));
-    assert!(config.contains("name = \"OpenAI\""));
+    assert!(config.contains("name = \"DeepSeek · deepseek-v4-flash\""));
+    assert!(!config.contains("[model_providers.OpenAI]"));
+    assert!(!config.contains("name = \"OpenAI\""));
 }
 
 #[test]
@@ -543,10 +545,11 @@ fn writing_takeover_config_backs_up_existing_config_once() {
     let backup = std::fs::read_to_string(backup_path).unwrap();
     assert_eq!(backup, "model = \"gpt-5\"\n");
     let current = std::fs::read_to_string(config_path).unwrap();
-    assert!(current.contains(r#"model_provider = "OpenAI""#));
-    assert!(current.contains("[model_providers.OpenAI]"));
+    assert!(current.contains(r#"model_provider = "codex-api-switcher""#));
+    assert!(current.contains("[model_providers.codex-api-switcher]"));
     assert!(current.contains("model = \"another-model\""));
-    assert!(current.contains("name = \"OpenAI\""));
+    assert!(current.contains("name = \"XIAOMI · another-model\""));
+    assert!(!current.contains("[model_providers.OpenAI]"));
 }
 
 #[test]
@@ -576,8 +579,9 @@ followUpQueueMode = "steer"
     assert!(current.contains("enabled = true"));
     assert!(current.contains("[desktop]"));
     assert!(current.contains(r#"followUpQueueMode = "steer""#));
-    assert!(current.contains(r#"model_provider = "OpenAI""#));
-    assert!(current.contains("[model_providers.OpenAI]"));
+    assert!(current.contains(r#"model_provider = "codex-api-switcher""#));
+    assert!(current.contains("[model_providers.codex-api-switcher]"));
+    assert!(!current.contains("name = \"OpenAI\""));
 }
 
 #[test]
