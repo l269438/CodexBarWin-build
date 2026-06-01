@@ -1,4 +1,4 @@
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -22,6 +22,8 @@ use crate::{
         responses_to_chat_completions,
     },
 };
+
+const STREAM_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct ProxyRuntime {
@@ -178,13 +180,26 @@ async fn forward_to_chat_provider(
         .unwrap_or_default();
 
     let url = chat_completions_url(&provider.base_url);
-    let upstream = runtime
+    let request = runtime
         .client
         .post(url)
         .bearer_auth(provider.api_key)
-        .json(&request_body)
-        .send()
-        .await?;
+        .json(&request_body);
+
+    if is_stream {
+        let stream = chat_provider_sse_stream(
+            request,
+            runtime.history.clone(),
+            request_messages,
+            STREAM_KEEPALIVE_INTERVAL,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+        headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+        return Ok((headers, Body::from_stream(stream)).into_response());
+    }
+
+    let upstream = request.send().await?;
 
     let status = upstream.status();
     if !status.is_success() {
@@ -204,10 +219,11 @@ async fn forward_to_chat_provider(
         .to_string();
 
     if is_stream || content_type.contains("text/event-stream") {
-        let stream = chat_sse_to_responses_sse(
+        let stream = chat_sse_to_responses_sse_with_keepalive(
             upstream.bytes_stream(),
             runtime.history.clone(),
             request_messages,
+            STREAM_KEEPALIVE_INTERVAL,
         );
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
@@ -267,10 +283,59 @@ struct StreamToolCall {
     output_added: bool,
 }
 
-fn chat_sse_to_responses_sse(
+fn chat_provider_sse_stream(
+    request: reqwest::RequestBuilder,
+    history: Arc<ConversationHistoryStore>,
+    request_messages: Vec<Value>,
+    keepalive_interval: Duration,
+) -> impl Stream<Item = Result<Bytes, Infallible>> + Send {
+    async_stream::stream! {
+        let send = request.send();
+        tokio::pin!(send);
+        let upstream = loop {
+            match tokio::time::timeout(keepalive_interval, send.as_mut()).await {
+                Ok(Ok(response)) => break response,
+                Ok(Err(err)) => {
+                    yield Ok(response_failed_event(&StreamState::default(), err.to_string()));
+                    return;
+                }
+                Err(_) => yield Ok(sse_keepalive()),
+            }
+        };
+
+        let status = upstream.status();
+        if !status.is_success() {
+            let read_text = upstream.text();
+            tokio::pin!(read_text);
+            let message = loop {
+                match tokio::time::timeout(keepalive_interval, read_text.as_mut()).await {
+                    Ok(Ok(text)) => break text,
+                    Ok(Err(err)) => break err.to_string(),
+                    Err(_) => yield Ok(sse_keepalive()),
+                }
+            };
+            yield Ok(response_failed_event(&StreamState::default(), message));
+            return;
+        }
+
+        let responses = chat_sse_to_responses_sse_with_keepalive(
+            upstream.bytes_stream(),
+            history,
+            request_messages,
+            keepalive_interval,
+        );
+        tokio::pin!(responses);
+        while let Some(item) = responses.next().await {
+            yield item;
+        }
+    }
+}
+
+fn chat_sse_to_responses_sse_with_keepalive(
     stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
     history: Arc<ConversationHistoryStore>,
     request_messages: Vec<Value>,
+    keepalive_interval: Duration,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
@@ -280,7 +345,15 @@ fn chat_sse_to_responses_sse(
         };
         tokio::pin!(stream);
 
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = match tokio::time::timeout(keepalive_interval, stream.next()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_) => {
+                    yield Ok(sse_keepalive());
+                    continue;
+                }
+            };
             let Ok(bytes) = item else {
                 yield Ok(sse_event("response.failed", json!({
                     "type": "response.failed",
@@ -715,10 +788,51 @@ fn sse_event(event: &str, data: Value) -> Bytes {
     ))
 }
 
+fn sse_keepalive() -> Bytes {
+    Bytes::from(": codexpilot-keepalive\n\n")
+}
+
+fn response_failed_event(state: &StreamState, message: String) -> Bytes {
+    sse_event(
+        "response.failed",
+        json!({
+            "type": "response.failed",
+            "response": base_response(state, "failed", vec![]),
+            "error": {
+                "message": message,
+                "type": "proxy_error"
+            }
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
+    use futures::{StreamExt, stream};
+
+    #[tokio::test]
+    async fn response_stream_sends_keepalive_while_upstream_is_quiet() {
+        let history = Arc::new(ConversationHistoryStore::default());
+        let upstream = stream::pending::<Result<Bytes, reqwest::Error>>();
+        let mut responses = Box::pin(chat_sse_to_responses_sse_with_keepalive(
+            upstream,
+            history,
+            Vec::new(),
+            Duration::from_millis(1),
+        ));
+
+        let chunk = tokio::time::timeout(Duration::from_millis(100), responses.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            String::from_utf8(chunk.to_vec()).unwrap(),
+            ": codexpilot-keepalive\n\n"
+        );
+    }
 
     #[tokio::test]
     async fn streamed_chat_tool_call_emits_response_function_call_and_records_history() {
@@ -732,9 +846,14 @@ mod tests {
         );
         let upstream = stream::iter(vec![Ok::<Bytes, reqwest::Error>(Bytes::from(sse))]);
 
-        let chunks = chat_sse_to_responses_sse(upstream, history.clone(), request_messages)
-            .collect::<Vec<_>>()
-            .await;
+        let chunks = chat_sse_to_responses_sse_with_keepalive(
+            upstream,
+            history.clone(),
+            request_messages,
+            Duration::from_secs(10),
+        )
+        .collect::<Vec<_>>()
+        .await;
         let output = chunks
             .into_iter()
             .map(|chunk| String::from_utf8(chunk.unwrap().to_vec()).unwrap())
