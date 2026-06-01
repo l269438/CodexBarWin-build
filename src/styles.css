@@ -209,8 +209,13 @@ button:disabled {
 }
 
 .api-panel {
-  grid-template-rows: auto auto auto 108px auto auto 14px;
+  grid-template-rows: auto auto auto 92px auto auto 14px;
   gap: 7px;
+  padding-bottom: 10px;
+}
+
+.accounts-panel {
+  gap: 8px;
   padding-bottom: 10px;
 }
 
@@ -339,6 +344,7 @@ label,
 .danger-button,
 .workspace-footer button,
 .backup-actions button,
+.network-controls button,
 .account-menu button {
   display: inline-flex;
   min-height: 34px;
@@ -365,6 +371,7 @@ label,
 .icon-button,
 .workspace-footer button,
 .backup-actions button,
+.network-controls button,
 .account-menu button {
   border: 1px solid var(--line);
   background:
@@ -451,6 +458,67 @@ label,
   font-size: 11px;
 }
 
+.network-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.25fr);
+  align-items: center;
+  gap: 9px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 8px 9px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.66), rgba(247, 249, 248, 0.46));
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.72) inset;
+}
+
+.network-summary {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.network-summary span,
+.network-summary small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.network-summary strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 670;
+}
+
+.network-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+}
+
+.network-controls input {
+  min-height: 30px;
+  font-size: 11px;
+}
+
+.network-controls button {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+
+.network-controls button:last-child {
+  padding: 0 8px;
+}
+
+.accounts-panel .network-panel {
+  padding: 7px 9px;
+}
+
 .account-row,
 .provider-row {
   display: grid;
@@ -472,7 +540,8 @@ label,
 .account-row {
   grid-template-columns: 36px minmax(0, 1fr) auto;
   gap: 8px;
-  padding: 8px 10px;
+  min-height: 52px;
+  padding: 7px 10px;
 }
 
 .account-avatar,
@@ -607,14 +676,14 @@ label,
 }
 
 .provider-table {
-  height: 108px;
-  min-height: 108px;
-  max-height: 108px;
+  height: 92px;
+  min-height: 92px;
+  max-height: 92px;
   margin-bottom: 8px;
 }
 
 .api-panel .provider-row {
-  min-height: 53px;
+  min-height: 45px;
   padding-block: 6px;
 }
 
@@ -701,6 +770,7 @@ select:hover,
 .icon-button:hover,
 .workspace-footer button:hover,
 .backup-actions button:hover,
+.network-controls button:hover,
 .account-menu button:hover,
 .provider-row:hover,
 .account-row:hover {

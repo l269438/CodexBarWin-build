@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use codex_api_switcher::{
-    AppConfig, AppState, ChatGptAuthStatus, OriginalBackupStatus, ProxyStatus,
+    AppConfig, AppState, ChatGptAuthStatus, NetworkEnvStatus, OriginalBackupStatus, ProxyStatus,
     accounts::CodexVisibleAccountProjection, store::Provider, usage::CodexUsageSummary,
 };
 use std::process::Command;
@@ -63,6 +63,24 @@ fn create_original_backup(state: State<'_, AppState>) -> Result<OriginalBackupSt
 #[tauri::command]
 fn get_chatgpt_auth_status(state: State<'_, AppState>) -> Result<ChatGptAuthStatus, String> {
     state.get_chatgpt_auth_status()
+}
+
+#[tauri::command]
+fn get_network_env_status(state: State<'_, AppState>) -> Result<NetworkEnvStatus, String> {
+    state.get_network_env_status()
+}
+
+#[tauri::command]
+fn apply_network_proxy_env(
+    state: State<'_, AppState>,
+    endpoint: String,
+) -> Result<NetworkEnvStatus, String> {
+    state.apply_network_proxy_env(endpoint)
+}
+
+#[tauri::command]
+fn restore_network_proxy_env(state: State<'_, AppState>) -> Result<NetworkEnvStatus, String> {
+    state.restore_network_proxy_env()
 }
 
 #[tauri::command]
@@ -175,6 +193,9 @@ fn main() {
             get_original_backup_status,
             create_original_backup,
             get_chatgpt_auth_status,
+            get_network_env_status,
+            apply_network_proxy_env,
+            restore_network_proxy_env,
             repair_chatgpt_auth_mode,
             restore_original_backup,
             load_account_projection,

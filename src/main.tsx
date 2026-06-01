@@ -100,6 +100,16 @@ interface ChatGptAuthStatus {
   canRepair: boolean;
 }
 
+interface NetworkEnvStatus {
+  exists: boolean;
+  configured: boolean;
+  managed: boolean;
+  backupExists: boolean;
+  hasNoProxy: boolean;
+  proxyEndpoint?: string | null;
+  envPath: string;
+}
+
 type Workspace = "accounts" | "api";
 
 const emptyProvider = (): Provider => ({
@@ -164,6 +174,16 @@ let browserChatGptAuth: ChatGptAuthStatus = {
   canRepair: false,
 };
 
+let browserNetworkEnv: NetworkEnvStatus = {
+  exists: false,
+  configured: false,
+  managed: false,
+  backupExists: false,
+  hasNoProxy: false,
+  proxyEndpoint: null,
+  envPath: "~/.codex/.env",
+};
+
 function hasTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
 }
@@ -182,6 +202,30 @@ async function callCommand<T>(command: string, args?: Record<string, unknown>): 
       return structuredClone(browserOriginalBackup) as T;
     case "get_chatgpt_auth_status":
       return structuredClone(browserChatGptAuth) as T;
+    case "get_network_env_status":
+      return structuredClone(browserNetworkEnv) as T;
+    case "apply_network_proxy_env":
+      browserNetworkEnv = {
+        exists: true,
+        configured: true,
+        managed: true,
+        backupExists: true,
+        hasNoProxy: true,
+        proxyEndpoint: args?.endpoint as string,
+        envPath: "~/.codex/.env",
+      };
+      return structuredClone(browserNetworkEnv) as T;
+    case "restore_network_proxy_env":
+      browserNetworkEnv = {
+        exists: false,
+        configured: false,
+        managed: false,
+        backupExists: browserNetworkEnv.backupExists,
+        hasNoProxy: false,
+        proxyEndpoint: null,
+        envPath: "~/.codex/.env",
+      };
+      return structuredClone(browserNetworkEnv) as T;
     case "repair_chatgpt_auth_mode":
       if (browserChatGptAuth.hasTokens) {
         browserChatGptAuth = {
@@ -348,6 +392,14 @@ function authStatusLabel(status: ChatGptAuthStatus | null) {
   return "需检查";
 }
 
+function networkEnvLabel(status: NetworkEnvStatus | null) {
+  if (!status) return "检测中";
+  if (status.configured) return "已写入";
+  if (status.managed && !status.hasNoProxy) return "需补全";
+  if (status.exists) return "未托管";
+  return "未配置";
+}
+
 function usageFill(value: number | null) {
   if (value === null) return "0%";
   return `${Math.max(0, Math.min(100, Math.round(value)))}%`;
@@ -399,27 +451,36 @@ function App() {
   const [accountUsage, setAccountUsage] = React.useState<Record<string, AccountUsageSnapshot>>({});
   const [originalBackup, setOriginalBackup] = React.useState<OriginalBackupStatus | null>(null);
   const [chatGptAuth, setChatGptAuth] = React.useState<ChatGptAuthStatus | null>(null);
+  const [networkEnv, setNetworkEnv] = React.useState<NetworkEnvStatus | null>(null);
   const [activeWorkspace, setActiveWorkspace] = React.useState<Workspace>("accounts");
   const [selectedId, setSelectedId] = React.useState<string>("");
   const [draft, setDraft] = React.useState<Provider | null>(null);
+  const [networkEndpoint, setNetworkEndpoint] = React.useState("127.0.0.1:7890");
   const [busy, setBusy] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [accountMessage, setAccountMessage] = React.useState("");
 
   const load = React.useCallback(async () => {
-    const [nextConfig, nextStatus, nextAccounts, nextBackup, nextAuth] = await Promise.all([
+    const [nextConfig, nextStatus, nextAccounts, nextBackup, nextAuth, nextNetworkEnv] = await Promise.all([
       callCommand<AppConfig>("get_app_config"),
       callCommand<ProxyStatus>("get_proxy_status"),
       callCommand<CodexVisibleAccountProjection>("load_account_projection"),
       callCommand<OriginalBackupStatus>("get_original_backup_status"),
       callCommand<ChatGptAuthStatus>("get_chatgpt_auth_status"),
+      callCommand<NetworkEnvStatus>("get_network_env_status"),
     ]);
     setConfig(nextConfig);
     setStatus(nextStatus);
     setAccounts(nextAccounts);
     setOriginalBackup(nextBackup);
     setChatGptAuth(nextAuth);
+    setNetworkEnv(nextNetworkEnv);
+    setNetworkEndpoint((current) =>
+      current === "127.0.0.1:7890" && nextNetworkEnv.proxyEndpoint
+        ? nextNetworkEnv.proxyEndpoint
+        : current,
+    );
     setSelectedId((currentSelectedId) => {
       const selectedStillExists = nextConfig.providers.some(
         (provider) => provider.id === currentSelectedId,
@@ -734,6 +795,27 @@ function App() {
     setChatGptAuth(next);
   }
 
+  async function applyNetworkProxyEnv() {
+    const endpoint = networkEndpoint.trim();
+    if (!endpoint) {
+      setAccountMessage("请填写代理地址，例如 127.0.0.1:7890");
+      return;
+    }
+    const next = await runAccount(
+      () => callCommand<NetworkEnvStatus>("apply_network_proxy_env", { endpoint }),
+      "网络代理环境已写入，重启 Codex 后生效",
+    );
+    setNetworkEnv(next);
+  }
+
+  async function restoreNetworkProxyEnv() {
+    const next = await runAccount(
+      () => callCommand<NetworkEnvStatus>("restore_network_proxy_env"),
+      "网络代理环境已还原，重启 Codex 后生效",
+    );
+    setNetworkEnv(next);
+  }
+
   const currentProvider = config?.providers.find(
     (provider) => provider.id === config.currentProviderId,
   );
@@ -748,10 +830,11 @@ function App() {
   const accountCount = uniqueAccounts.length;
   const managedCount = accounts?.accounts.filter((account) => !account.isLive).length ?? 0;
   const displayedProviders = config?.providers.slice(0, 3) ?? [];
-  const displayedAccounts = uniqueAccounts.slice(0, 3);
+  const displayedAccounts = uniqueAccounts.slice(0, 2);
   const currentRouteLabel =
     (draft ?? currentProvider)?.apiFormat === "open_ai_chat" ? "聊天转换" : "响应直连";
   const officialFeatureLabel = authStatusLabel(chatGptAuth);
+  const networkFeatureLabel = networkEnvLabel(networkEnv);
 
   return (
     <main className="app-shell">
@@ -917,6 +1000,38 @@ function App() {
                   type="button"
                 >
                   <RotateCcw size={15} />
+                  还原
+                </button>
+              </div>
+            </section>
+
+            <section className="network-panel" aria-label="网络修复">
+              <div className="network-summary">
+                <span>网络修复</span>
+                <strong>{networkFeatureLabel}</strong>
+                <small>
+                  {networkEnv?.proxyEndpoint
+                    ? `代理 ${networkEnv.proxyEndpoint}`
+                    : networkEnv?.envPath || "~/.codex/.env"}
+                </small>
+              </div>
+              <div className="network-controls">
+                <input
+                  aria-label="代理地址"
+                  value={networkEndpoint}
+                  placeholder="127.0.0.1:7890"
+                  onChange={(event) => setNetworkEndpoint(event.currentTarget.value)}
+                />
+                <button disabled={busy} onClick={applyNetworkProxyEnv} type="button">
+                  写入
+                </button>
+                <button
+                  disabled={busy || !networkEnv?.backupExists}
+                  onClick={restoreNetworkProxyEnv}
+                  title="还原网络配置"
+                  type="button"
+                >
+                  <RotateCcw size={14} />
                   还原
                 </button>
               </div>

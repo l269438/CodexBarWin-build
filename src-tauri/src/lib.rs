@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod codex_live;
 pub mod history;
+pub mod network_env;
 pub mod official_auth;
 pub mod official_backup;
 pub mod proxy;
@@ -14,6 +15,7 @@ use accounts::{
     CodexActiveSource, CodexVisibleAccountProjection, FileActiveSourceStore,
     FileManagedCodexAccountStore, ManagedCodexAccountSet,
 };
+pub use network_env::NetworkEnvStatus;
 pub use official_auth::ChatGptAuthStatus;
 pub use official_backup::OriginalBackupStatus;
 use serde::{Deserialize, Serialize};
@@ -164,6 +166,31 @@ impl AppState {
     pub fn get_chatgpt_auth_status(&self) -> Result<ChatGptAuthStatus, String> {
         official_auth::load_chatgpt_auth_status(&codex_live::default_codex_dir())
             .map_err(|e| e.to_string())
+    }
+
+    pub fn get_network_env_status(&self) -> Result<NetworkEnvStatus, String> {
+        network_env::load_network_env_status(
+            &codex_live::default_codex_dir(),
+            &network_env::default_network_env_backup_root(),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn apply_network_proxy_env(&self, endpoint: String) -> Result<NetworkEnvStatus, String> {
+        network_env::apply_network_proxy_env(
+            &codex_live::default_codex_dir(),
+            &network_env::default_network_env_backup_root(),
+            &endpoint,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn restore_network_proxy_env(&self) -> Result<NetworkEnvStatus, String> {
+        network_env::restore_network_proxy_env(
+            &codex_live::default_codex_dir(),
+            &network_env::default_network_env_backup_root(),
+        )
+        .map_err(|e| e.to_string())
     }
 
     pub fn repair_chatgpt_auth_mode(&self) -> Result<ChatGptAuthStatus, String> {
