@@ -75,17 +75,22 @@ pub fn restore_original_config(codex_dir: &Path) -> anyhow::Result<()> {
     let config_path = codex_dir.join("config.toml");
     let backup_path = switcher_backup_path(codex_dir);
 
-    if backup_path.exists() {
-        fs::copy(&backup_path, &config_path)?;
-        fs::remove_file(backup_path)?;
-        return Ok(());
-    }
-
     if config_path.exists() {
         let current = fs::read_to_string(&config_path)?;
+        if backup_path.exists() {
+            if is_switcher_config(&current) {
+                fs::copy(&backup_path, &config_path)?;
+            }
+            fs::remove_file(backup_path)?;
+            return Ok(());
+        }
+
         if is_switcher_config(&current) {
             fs::remove_file(config_path)?;
         }
+    } else if backup_path.exists() {
+        fs::copy(&backup_path, &config_path)?;
+        fs::remove_file(backup_path)?;
     }
 
     Ok(())
@@ -95,7 +100,7 @@ fn backup_existing_config(codex_dir: &Path) -> anyhow::Result<()> {
     let config_path = codex_dir.join("config.toml");
     let backup_path = switcher_backup_path(codex_dir);
 
-    if !config_path.exists() || backup_path.exists() {
+    if !config_path.exists() {
         return Ok(());
     }
 

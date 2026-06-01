@@ -7,10 +7,10 @@ import {
   CheckCircle2,
   Folder,
   KeyRound,
-  MoreHorizontal,
   Plus,
   Power,
   RefreshCw,
+  RotateCcw,
   Save,
   Shield,
   Trash2,
@@ -75,9 +75,27 @@ interface CodexUsageSummary {
 }
 
 interface AccountUsageSnapshot {
-  sessionPercent: number | null;
-  weeklyPercent: number | null;
+  sessionUsedPercent: number | null;
+  sessionRemainingPercent: number | null;
+  weeklyUsedPercent: number | null;
+  weeklyRemainingPercent: number | null;
   status: "refreshing" | "ready" | "unavailable";
+}
+
+interface OriginalBackupStatus {
+  exists: boolean;
+  createdAt?: number | null;
+  authJsonBackedUp: boolean;
+  configTomlBackedUp: boolean;
+}
+
+interface ChatGptAuthStatus {
+  hasAuthFile: boolean;
+  authModeChatgpt: boolean;
+  apiKeyDisabled: boolean;
+  hasTokens: boolean;
+  compatible: boolean;
+  canRepair: boolean;
 }
 
 type Workspace = "accounts" | "api";
@@ -128,6 +146,22 @@ let browserAccounts: CodexVisibleAccountProjection = {
   hasUnreadableStore: false,
 };
 
+let browserOriginalBackup: OriginalBackupStatus = {
+  exists: false,
+  createdAt: null,
+  authJsonBackedUp: false,
+  configTomlBackedUp: false,
+};
+
+let browserChatGptAuth: ChatGptAuthStatus = {
+  hasAuthFile: true,
+  authModeChatgpt: true,
+  apiKeyDisabled: true,
+  hasTokens: true,
+  compatible: true,
+  canRepair: false,
+};
+
 function hasTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
 }
@@ -142,6 +176,43 @@ async function callCommand<T>(command: string, args?: Record<string, unknown>): 
       return structuredClone(browserConfig) as T;
     case "get_proxy_status":
       return structuredClone(browserStatus) as T;
+    case "get_original_backup_status":
+      return structuredClone(browserOriginalBackup) as T;
+    case "get_chatgpt_auth_status":
+      return structuredClone(browserChatGptAuth) as T;
+    case "repair_chatgpt_auth_mode":
+      if (browserChatGptAuth.hasTokens) {
+        browserChatGptAuth = {
+          ...browserChatGptAuth,
+          authModeChatgpt: true,
+          apiKeyDisabled: true,
+          compatible: true,
+          canRepair: false,
+        };
+      }
+      return structuredClone(browserChatGptAuth) as T;
+    case "create_original_backup":
+      browserOriginalBackup = {
+        exists: true,
+        createdAt: browserOriginalBackup.createdAt ?? Math.floor(Date.now() / 1000),
+        authJsonBackedUp: true,
+        configTomlBackedUp: true,
+      };
+      return structuredClone(browserOriginalBackup) as T;
+    case "restore_original_backup":
+      if (!browserOriginalBackup.exists) {
+        throw new Error("original Codex backup has not been created");
+      }
+      browserStatus = {
+        running: false,
+        port: browserConfig.proxyPort,
+        currentProviderId: browserConfig.currentProviderId,
+      };
+      browserAccounts.accounts = browserAccounts.accounts.map((account) => ({
+        ...account,
+        isActive: account.id === "live",
+      }));
+      return structuredClone(browserOriginalBackup) as T;
     case "load_account_projection":
       return structuredClone(browserAccounts) as T;
     case "load_account_usage": {
@@ -195,6 +266,15 @@ async function callCommand<T>(command: string, args?: Record<string, unknown>): 
       if (!browserConfig.currentProviderId) {
         throw new Error("Add and select a provider before starting the proxy");
       }
+      if (browserChatGptAuth.hasTokens) {
+        browserChatGptAuth = {
+          ...browserChatGptAuth,
+          authModeChatgpt: true,
+          apiKeyDisabled: true,
+          compatible: true,
+          canRepair: false,
+        };
+      }
       browserStatus = {
         running: true,
         port: browserConfig.proxyPort,
@@ -240,12 +320,30 @@ function formatUsagePercent(value: number | null) {
   return value === null ? "--" : `${Math.round(value)}%`;
 }
 
+function formatBackupTime(value: number | null | undefined) {
+  if (!value) return "尚未备份";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value * 1000));
+}
+
 function usageLabel(usage: AccountUsageSnapshot | undefined) {
   if (!usage || usage.status === "refreshing") return "用量刷新中";
   if (usage.status === "unavailable") return "用量暂不可用";
-  return `会话 ${formatUsagePercent(usage.sessionPercent)} · 每周 ${formatUsagePercent(
-    usage.weeklyPercent,
+  return `会话剩余 ${formatUsagePercent(usage.sessionRemainingPercent)} · 每周剩余 ${formatUsagePercent(
+    usage.weeklyRemainingPercent,
   )}`;
+}
+
+function authStatusLabel(status: ChatGptAuthStatus | null) {
+  if (!status) return "检测中";
+  if (status.compatible) return "插件可用";
+  if (status.canRepair) return "可修复";
+  if (!status.hasAuthFile || !status.hasTokens) return "需官方登录";
+  return "需检查";
 }
 
 function usageFill(value: number | null) {
@@ -265,27 +363,61 @@ function formatWorkspaceLabel(label: string | null | undefined) {
   return normalized;
 }
 
+function accountDisplayKey(account: VisibleCodexAccount) {
+  const normalizedEmail = account.email
+    .normalize("NFKC")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+  return normalizedEmail || account.workspaceAccountId || account.id;
+}
+
+function preferredDisplayAccount(
+  current: VisibleCodexAccount,
+  next: VisibleCodexAccount,
+) {
+  if (next.isActive && !current.isActive) return next;
+  if (next.isLive && !current.isLive) return next;
+  return current;
+}
+
+function uniqueDisplayAccounts(accounts: VisibleCodexAccount[]) {
+  const byIdentity = new Map<string, VisibleCodexAccount>();
+  for (const account of accounts) {
+    const key = accountDisplayKey(account);
+    const current = byIdentity.get(key);
+    byIdentity.set(key, current ? preferredDisplayAccount(current, account) : account);
+  }
+  return Array.from(byIdentity.values());
+}
+
 function App() {
   const [config, setConfig] = React.useState<AppConfig | null>(null);
   const [status, setStatus] = React.useState<ProxyStatus | null>(null);
   const [accounts, setAccounts] = React.useState<CodexVisibleAccountProjection | null>(null);
   const [accountUsage, setAccountUsage] = React.useState<Record<string, AccountUsageSnapshot>>({});
+  const [originalBackup, setOriginalBackup] = React.useState<OriginalBackupStatus | null>(null);
+  const [chatGptAuth, setChatGptAuth] = React.useState<ChatGptAuthStatus | null>(null);
   const [activeWorkspace, setActiveWorkspace] = React.useState<Workspace>("accounts");
   const [selectedId, setSelectedId] = React.useState<string>("");
   const [draft, setDraft] = React.useState<Provider | null>(null);
   const [busy, setBusy] = React.useState(false);
+  const [refreshing, setRefreshing] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [accountMessage, setAccountMessage] = React.useState("");
 
   const load = React.useCallback(async () => {
-    const [nextConfig, nextStatus, nextAccounts] = await Promise.all([
+    const [nextConfig, nextStatus, nextAccounts, nextBackup, nextAuth] = await Promise.all([
       callCommand<AppConfig>("get_app_config"),
       callCommand<ProxyStatus>("get_proxy_status"),
       callCommand<CodexVisibleAccountProjection>("load_account_projection"),
+      callCommand<OriginalBackupStatus>("get_original_backup_status"),
+      callCommand<ChatGptAuthStatus>("get_chatgpt_auth_status"),
     ]);
     setConfig(nextConfig);
     setStatus(nextStatus);
     setAccounts(nextAccounts);
+    setOriginalBackup(nextBackup);
+    setChatGptAuth(nextAuth);
     setSelectedId((currentSelectedId) => {
       const selectedStillExists = nextConfig.providers.some(
         (provider) => provider.id === currentSelectedId,
@@ -300,6 +432,32 @@ function App() {
   React.useEffect(() => {
     void load();
   }, [load]);
+
+  async function refreshApp(scope: Workspace = activeWorkspace) {
+    setRefreshing(true);
+    if (scope === "accounts") {
+      setAccountMessage("正在刷新账号状态...");
+    } else {
+      setMessage("正在刷新接入状态...");
+    }
+    try {
+      await load();
+      if (scope === "accounts") {
+        setAccountMessage("账号状态已刷新");
+      } else {
+        setMessage("接入状态已刷新");
+      }
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      if (scope === "accounts") {
+        setAccountMessage(text);
+      } else {
+        setMessage(text);
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   React.useEffect(() => {
     if (!config || !selectedId) return;
@@ -327,7 +485,13 @@ function App() {
         next[accountId] =
           current[accountId]?.status === "ready"
             ? current[accountId]
-            : { sessionPercent: null, weeklyPercent: null, status: "refreshing" };
+            : {
+                sessionUsedPercent: null,
+                sessionRemainingPercent: null,
+                weeklyUsedPercent: null,
+                weeklyRemainingPercent: null,
+                status: "refreshing",
+              };
       }
       return next;
     });
@@ -339,8 +503,10 @@ function App() {
           setAccountUsage((current) => ({
             ...current,
             [accountId]: {
-              sessionPercent: summary.session?.usedPercent ?? null,
-              weeklyPercent: summary.weekly?.usedPercent ?? null,
+              sessionUsedPercent: summary.session?.usedPercent ?? null,
+              sessionRemainingPercent: summary.session?.remainingPercent ?? null,
+              weeklyUsedPercent: summary.weekly?.usedPercent ?? null,
+              weeklyRemainingPercent: summary.weekly?.remainingPercent ?? null,
               status: "ready",
             },
           }));
@@ -350,8 +516,10 @@ function App() {
           setAccountUsage((current) => ({
             ...current,
             [accountId]: {
-              sessionPercent: null,
-              weeklyPercent: null,
+              sessionUsedPercent: null,
+              sessionRemainingPercent: null,
+              weeklyUsedPercent: null,
+              weeklyRemainingPercent: null,
               status: "unavailable",
             },
           }));
@@ -447,6 +615,7 @@ function App() {
       "本地 Codex 代理已启动",
     );
     setStatus(next);
+    setChatGptAuth(await callCommand<ChatGptAuthStatus>("get_chatgpt_auth_status"));
   }
 
   async function stopProxy() {
@@ -538,6 +707,31 @@ function App() {
     await runAccount(() => callCommand<void>("open_codex_home"), "Codex 目录已打开");
   }
 
+  async function createOriginalBackup() {
+    const next = await runAccount(
+      () => callCommand<OriginalBackupStatus>("create_original_backup"),
+      "官方环境已备份",
+    );
+    setOriginalBackup(next);
+  }
+
+  async function restoreOriginalBackup() {
+    const next = await runAccount(
+      () => callCommand<OriginalBackupStatus>("restore_original_backup"),
+      "已还原官方环境",
+    );
+    setOriginalBackup(next);
+    await load();
+  }
+
+  async function repairChatGptAuthMode() {
+    const next = await run(
+      () => callCommand<ChatGptAuthStatus>("repair_chatgpt_auth_mode"),
+      "官方登录态已修复",
+    );
+    setChatGptAuth(next);
+  }
+
   const currentProvider = config?.providers.find(
     (provider) => provider.id === config.currentProviderId,
   );
@@ -548,12 +742,14 @@ function App() {
     draft && config?.providers.some((provider) => provider.id === draft.id),
   );
   const providerCount = config?.providers.length ?? 0;
-  const accountCount = accounts?.accounts.length ?? 0;
+  const uniqueAccounts = uniqueDisplayAccounts(accounts?.accounts ?? []);
+  const accountCount = uniqueAccounts.length;
   const managedCount = accounts?.accounts.filter((account) => !account.isLive).length ?? 0;
   const displayedProviders = config?.providers.slice(0, 3) ?? [];
-  const displayedAccounts = accounts?.accounts.slice(0, 3) ?? [];
+  const displayedAccounts = uniqueAccounts.slice(0, 3);
   const currentRouteLabel =
     (draft ?? currentProvider)?.apiFormat === "open_ai_chat" ? "聊天转换" : "响应直连";
+  const officialFeatureLabel = authStatusLabel(chatGptAuth);
 
   return (
     <main className="app-shell">
@@ -563,11 +759,11 @@ function App() {
             <div className="brand-mark">CP</div>
             <div className="brand-copy">
               <h1>CodexPilot</h1>
-              <p>{status?.running ? "代理运行中" : "单层控制台"}</p>
+              <p>{status?.running ? "代理运行中" : "本地控制台"}</p>
             </div>
           </div>
           <div className="status-stack">
-            <strong>{status?.running ? "ON" : "OFF"}</strong>
+            <strong>{status?.running ? "运行" : "待机"}</strong>
             <span>{providerCount} API · {managedCount} 账号</span>
           </div>
         </header>
@@ -610,23 +806,25 @@ function App() {
 
             <section className="usage-panel" aria-label="用量概览">
               <div>
-                <span>会话</span>
-                <strong>{formatUsagePercent(activeUsage?.sessionPercent ?? null)}</strong>
+                <span>会话剩余</span>
+                <strong>{formatUsagePercent(activeUsage?.sessionRemainingPercent ?? null)}</strong>
+                <small>已用 {formatUsagePercent(activeUsage?.sessionUsedPercent ?? null)}</small>
                 <i
                   style={
                     {
-                      "--usage-fill": usageFill(activeUsage?.sessionPercent ?? null),
+                      "--usage-fill": usageFill(activeUsage?.sessionRemainingPercent ?? null),
                     } as React.CSSProperties
                   }
                 />
               </div>
               <div>
-                <span>每周</span>
-                <strong>{formatUsagePercent(activeUsage?.weeklyPercent ?? null)}</strong>
+                <span>每周剩余</span>
+                <strong>{formatUsagePercent(activeUsage?.weeklyRemainingPercent ?? null)}</strong>
+                <small>已用 {formatUsagePercent(activeUsage?.weeklyUsedPercent ?? null)}</small>
                 <i
                   style={
                     {
-                      "--usage-fill": usageFill(activeUsage?.weeklyPercent ?? null),
+                      "--usage-fill": usageFill(activeUsage?.weeklyRemainingPercent ?? null),
                     } as React.CSSProperties
                   }
                 />
@@ -641,7 +839,13 @@ function App() {
               <button className="soft-button" disabled={busy} onClick={importCurrentAccount} type="button">
                 导入当前
               </button>
-              <button className="icon-button" disabled={busy} onClick={() => void load()} title="刷新" type="button">
+              <button
+                className={`icon-button ${refreshing ? "is-loading" : ""}`}
+                disabled={busy || refreshing}
+                onClick={() => void refreshApp("accounts")}
+                title={refreshing ? "刷新中" : "刷新"}
+                type="button"
+              >
                 <RefreshCw size={17} />
               </button>
             </section>
@@ -669,21 +873,13 @@ function App() {
                         </small>
                       </span>
                       <span className="account-menu">
-                        {!account.isActive ? (
+                        {account.isActive ? (
+                          <span className="account-current">当前</span>
+                        ) : (
                           <button disabled={busy} onClick={() => switchAccount(account.id)} type="button">
                             切换
                           </button>
-                        ) : null}
-                        <button
-                          disabled={busy}
-                          onClick={() =>
-                            account.isLive ? importCurrentAccount() : refreshManagedAccount(account.id)
-                          }
-                          title={account.isLive ? "导入当前" : "刷新账号"}
-                          type="button"
-                        >
-                          <MoreHorizontal size={17} />
-                        </button>
+                        )}
                       </span>
                     </div>
                   );
@@ -691,6 +887,35 @@ function App() {
               ) : (
                 <p className="empty">还没有检测到 Codex 账号。</p>
               )}
+            </section>
+
+            <section className="backup-panel" aria-label="官方环境保护">
+              <div>
+                <strong>官方环境保护</strong>
+                <span>
+                  {originalBackup?.exists
+                    ? `已备份 ${formatBackupTime(originalBackup.createdAt)}`
+                    : "保存当前 Codex 官方账号和配置"}
+                </span>
+              </div>
+              <div className="backup-actions">
+                <button
+                  disabled={busy || Boolean(originalBackup?.exists)}
+                  onClick={createOriginalBackup}
+                  type="button"
+                >
+                  <Shield size={15} />
+                  {originalBackup?.exists ? "已备份" : "备份"}
+                </button>
+                <button
+                  disabled={busy || !originalBackup?.exists}
+                  onClick={restoreOriginalBackup}
+                  type="button"
+                >
+                  <RotateCcw size={15} />
+                  还原
+                </button>
+              </div>
             </section>
 
             <footer className="workspace-footer">
@@ -726,8 +951,8 @@ function App() {
               </div>
               <div>
                 <Shield size={16} />
-                <span>会话</span>
-                <strong>保留</strong>
+                <span>官方能力</span>
+                <strong>{officialFeatureLabel}</strong>
               </div>
             </section>
 
@@ -747,9 +972,27 @@ function App() {
                 <Plus size={16} />
                 新服务商
               </button>
-              <button className="icon-button" disabled={busy} onClick={() => void load()} title="刷新" type="button">
-                <RefreshCw size={17} />
-              </button>
+              {chatGptAuth?.canRepair ? (
+                <button
+                  className="soft-button"
+                  disabled={busy}
+                  onClick={repairChatGptAuthMode}
+                  type="button"
+                >
+                  <Shield size={16} />
+                  修复
+                </button>
+              ) : (
+                <button
+                  className={`icon-button ${refreshing ? "is-loading" : ""}`}
+                  disabled={busy || refreshing}
+                  onClick={() => void refreshApp("api")}
+                  title={refreshing ? "刷新中" : "刷新"}
+                  type="button"
+                >
+                  <RefreshCw size={17} />
+                </button>
+              )}
             </section>
 
             <section className="compact-list provider-table" aria-label="服务商列表">
@@ -870,7 +1113,7 @@ function App() {
                 </button>
               </div>
             </footer>
-            {message && <p className="message">{message}</p>}
+            <p className="message api-message">{message || "\u00a0"}</p>
           </section>
         )}
       </section>

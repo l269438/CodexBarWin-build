@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine;
@@ -14,6 +14,7 @@ const DEFAULT_USAGE_BASE_URL: &str = "https://chatgpt.com/backend-api";
 const DEFAULT_USAGE_ENDPOINT: &str = "/wham/usage";
 const REFRESH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const REFRESH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const USAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexOAuthCredentials {
@@ -82,6 +83,7 @@ pub async fn load_usage_for_home(codex_home: &Path) -> Result<CodexUsageSummary,
     let mut credentials = load_credentials(&auth_path)?;
     let client = reqwest::Client::builder()
         .user_agent("CodexPilot")
+        .timeout(USAGE_REQUEST_TIMEOUT)
         .build()
         .map_err(|error| error.to_string())?;
 

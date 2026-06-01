@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use codex_api_switcher::{
-    AppConfig, AppState, ProxyStatus, accounts::CodexVisibleAccountProjection, store::Provider,
-    usage::CodexUsageSummary,
+    AppConfig, AppState, ChatGptAuthStatus, OriginalBackupStatus, ProxyStatus,
+    accounts::CodexVisibleAccountProjection, store::Provider, usage::CodexUsageSummary,
 };
 use std::process::Command;
 use tauri::State;
@@ -48,6 +48,33 @@ async fn stop_proxy(state: State<'_, AppState>) -> Result<ProxyStatus, String> {
 #[tauri::command]
 async fn get_proxy_status(state: State<'_, AppState>) -> Result<ProxyStatus, String> {
     Ok(state.get_proxy_status().await)
+}
+
+#[tauri::command]
+fn get_original_backup_status(state: State<'_, AppState>) -> Result<OriginalBackupStatus, String> {
+    state.get_original_backup_status()
+}
+
+#[tauri::command]
+fn create_original_backup(state: State<'_, AppState>) -> Result<OriginalBackupStatus, String> {
+    state.create_original_backup()
+}
+
+#[tauri::command]
+fn get_chatgpt_auth_status(state: State<'_, AppState>) -> Result<ChatGptAuthStatus, String> {
+    state.get_chatgpt_auth_status()
+}
+
+#[tauri::command]
+fn repair_chatgpt_auth_mode(state: State<'_, AppState>) -> Result<ChatGptAuthStatus, String> {
+    state.repair_chatgpt_auth_mode()
+}
+
+#[tauri::command]
+async fn restore_original_backup(
+    state: State<'_, AppState>,
+) -> Result<OriginalBackupStatus, String> {
+    state.restore_original_backup().await
 }
 
 #[tauri::command]
@@ -145,6 +172,11 @@ fn main() {
             start_proxy,
             stop_proxy,
             get_proxy_status,
+            get_original_backup_status,
+            create_original_backup,
+            get_chatgpt_auth_status,
+            repair_chatgpt_auth_mode,
+            restore_original_backup,
             load_account_projection,
             load_account_usage,
             import_current_account,

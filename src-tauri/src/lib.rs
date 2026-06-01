@@ -1,6 +1,8 @@
 pub mod accounts;
 pub mod codex_live;
 pub mod history;
+pub mod official_auth;
+pub mod official_backup;
 pub mod proxy;
 pub mod store;
 pub mod transform;
@@ -12,6 +14,8 @@ use accounts::{
     CodexActiveSource, CodexVisibleAccountProjection, FileActiveSourceStore,
     FileManagedCodexAccountStore, ManagedCodexAccountSet,
 };
+pub use official_auth::ChatGptAuthStatus;
+pub use official_backup::OriginalBackupStatus;
 use serde::{Deserialize, Serialize};
 pub use store::{AppConfig, Provider};
 use tokio::sync::{Mutex, RwLock};
@@ -86,6 +90,7 @@ impl AppState {
     }
 
     pub async fn write_codex_takeover(&self) -> Result<(), String> {
+        let _ = official_auth::ensure_chatgpt_auth_mode(&codex_live::default_codex_dir());
         let config = self.config.read().await;
         let provider = config
             .current_provider()
@@ -147,6 +152,52 @@ impl AppState {
             port: config.proxy_port,
             current_provider_id: config.current_provider_id.clone(),
         }
+    }
+
+    pub fn get_original_backup_status(&self) -> Result<OriginalBackupStatus, String> {
+        official_backup::load_original_backup_status(
+            &official_backup::default_original_backup_root(),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn get_chatgpt_auth_status(&self) -> Result<ChatGptAuthStatus, String> {
+        official_auth::load_chatgpt_auth_status(&codex_live::default_codex_dir())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn repair_chatgpt_auth_mode(&self) -> Result<ChatGptAuthStatus, String> {
+        official_auth::ensure_chatgpt_auth_mode(&codex_live::default_codex_dir())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn create_original_backup(&self) -> Result<OriginalBackupStatus, String> {
+        official_backup::create_original_backup(
+            &codex_live::default_codex_dir(),
+            &official_backup::default_original_backup_root(),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub async fn restore_original_backup(&self) -> Result<OriginalBackupStatus, String> {
+        {
+            let mut guard = self.proxy.lock().await;
+            if let Some(handle) = guard.take() {
+                handle.stop();
+            }
+        }
+        let status = official_backup::restore_original_backup(
+            &codex_live::default_codex_dir(),
+            &official_backup::default_original_backup_root(),
+        )
+        .map_err(|e| e.to_string())?;
+        let takeover_backup = codex_live::switcher_backup_path(&codex_live::default_codex_dir());
+        if takeover_backup.exists() {
+            std::fs::remove_file(takeover_backup).map_err(|e| e.to_string())?;
+        }
+        self.set_active_source(CodexActiveSource::LiveSystem)
+            .await?;
+        Ok(status)
     }
 
     pub async fn load_account_projection(&self) -> CodexVisibleAccountProjection {
@@ -279,6 +330,7 @@ impl AppState {
             &target,
             target_home.as_deref().map(std::path::Path::new),
         )?;
+        let _ = official_auth::ensure_chatgpt_auth_mode(&accounts::default_codex_home());
         self.set_active_source(target).await
     }
 

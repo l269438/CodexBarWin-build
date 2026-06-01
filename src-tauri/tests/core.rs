@@ -9,6 +9,7 @@ use codex_api_switcher::{
         build_takeover_config, restore_original_config, switcher_backup_path, write_takeover_config,
     },
     history::ConversationHistoryStore,
+    official_auth::{ensure_chatgpt_auth_mode, load_chatgpt_auth_status},
     proxy::{chat_completions_url, responses_url},
     store::{ApiFormat, Provider},
     transform::{CodexChatReasoning, chat_completion_to_response, responses_to_chat_completions},
@@ -288,7 +289,10 @@ fn usage_credentials_parse_tokens_from_auth_json() {
     assert_eq!(credentials.access_token, "access");
     assert_eq!(credentials.refresh_token, "refresh");
     assert_eq!(credentials.account_id.as_deref(), Some("acct_123"));
-    assert_eq!(credentials.account_email.as_deref(), Some("user@example.com"));
+    assert_eq!(
+        credentials.account_email.as_deref(),
+        Some("user@example.com")
+    );
 }
 
 #[test]
@@ -329,7 +333,10 @@ fn usage_response_maps_session_and_weekly_windows() {
         Some(61.0)
     );
     assert_eq!(
-        summary.weekly.as_ref().map(|window| window.remaining_percent),
+        summary
+            .weekly
+            .as_ref()
+            .map(|window| window.remaining_percent),
         Some(6.0)
     );
 }
@@ -406,6 +413,82 @@ fn writing_takeover_config_preserves_existing_auth_json() {
 }
 
 #[test]
+fn chatgpt_auth_compatibility_repair_preserves_tokens_and_disables_api_key_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("auth.json"),
+        r#"{"auth_mode":"api_key","OPENAI_API_KEY":"sk-live","tokens":{"id_token":"keep-me"},"extra":true}"#,
+    )
+    .unwrap();
+
+    let status = ensure_chatgpt_auth_mode(&codex_dir).unwrap();
+
+    assert!(status.compatible);
+    let repaired: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(codex_dir.join("auth.json")).unwrap()).unwrap();
+    assert_eq!(repaired["auth_mode"], "chatgpt");
+    assert!(repaired["OPENAI_API_KEY"].is_null());
+    assert_eq!(repaired["tokens"]["id_token"], "keep-me");
+    assert_eq!(repaired["extra"], true);
+}
+
+#[test]
+fn chatgpt_auth_status_reports_missing_tokens_without_rewriting_api_key_auth() {
+    let temp = tempfile::tempdir().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("auth.json"),
+        r#"{"auth_mode":"api_key","OPENAI_API_KEY":"sk-live"}"#,
+    )
+    .unwrap();
+
+    let status = ensure_chatgpt_auth_mode(&codex_dir).unwrap();
+
+    assert!(!status.compatible);
+    assert!(!status.has_tokens);
+    assert_eq!(
+        std::fs::read_to_string(codex_dir.join("auth.json")).unwrap(),
+        r#"{"auth_mode":"api_key","OPENAI_API_KEY":"sk-live"}"#
+    );
+}
+
+#[test]
+fn chatgpt_auth_status_detects_plugin_compatible_login() {
+    let temp = tempfile::tempdir().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("auth.json"),
+        r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"keep-me"}}"#,
+    )
+    .unwrap();
+
+    let status = load_chatgpt_auth_status(&codex_dir).unwrap();
+
+    assert!(status.compatible);
+    assert!(status.auth_mode_chatgpt);
+    assert!(status.api_key_disabled);
+    assert!(status.has_tokens);
+}
+
+#[test]
+fn chatgpt_auth_status_treats_invalid_auth_json_as_incompatible_without_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(codex_dir.join("auth.json"), b"{not-json").unwrap();
+
+    let status = load_chatgpt_auth_status(&codex_dir).unwrap();
+
+    assert!(status.has_auth_file);
+    assert!(!status.compatible);
+    assert!(!status.can_repair);
+}
+
+#[test]
 fn writing_takeover_config_backs_up_existing_config_once() {
     let temp = tempfile::tempdir().unwrap();
     let codex_dir = temp.path().join(".codex");
@@ -439,6 +522,40 @@ fn restore_original_config_puts_back_backup_and_removes_backup_file() {
     let restored = std::fs::read_to_string(config_path).unwrap();
     assert_eq!(restored, "model = \"gpt-5\"\n");
     assert!(!backup_path.exists());
+}
+
+#[test]
+fn restore_original_config_discards_stale_backup_without_overwriting_real_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+    let backup_path = switcher_backup_path(&codex_dir);
+    std::fs::write(&config_path, "model = \"current-real\"\n").unwrap();
+    std::fs::write(&backup_path, "model = \"stale-old\"\n").unwrap();
+
+    restore_original_config(&codex_dir).unwrap();
+
+    let current = std::fs::read_to_string(config_path).unwrap();
+    assert_eq!(current, "model = \"current-real\"\n");
+    assert!(!backup_path.exists());
+}
+
+#[test]
+fn takeover_replaces_stale_backup_with_current_real_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+    let backup_path = switcher_backup_path(&codex_dir);
+    std::fs::write(&config_path, "model = \"current-real\"\n").unwrap();
+    std::fs::write(&backup_path, "model = \"stale-old\"\n").unwrap();
+
+    write_takeover_config(&codex_dir, 15721, "DeepSeek", "deepseek-v4-flash").unwrap();
+    restore_original_config(&codex_dir).unwrap();
+
+    let restored = std::fs::read_to_string(config_path).unwrap();
+    assert_eq!(restored, "model = \"current-real\"\n");
 }
 
 #[test]
