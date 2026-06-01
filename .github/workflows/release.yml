@@ -16,18 +16,10 @@ permissions:
 
 jobs:
   macos:
-    name: macOS ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-14
-            target: aarch64-apple-darwin
-          - arch: x64
-            runner: macos-13
-            target: x86_64-apple-darwin
+    name: macOS arm64
+    runs-on: macos-14
+    env:
+      MACOS_TARGET: aarch64-apple-darwin
 
     steps:
       - name: Checkout
@@ -47,7 +39,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ env.MACOS_TARGET }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -56,15 +48,15 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build macOS app
-        run: pnpm tauri build --target ${{ matrix.target }}
+        run: pnpm tauri build --target ${{ env.MACOS_TARGET }}
 
       - name: Upload macOS bundle
         uses: actions/upload-artifact@v4
         with:
-          name: CodexPilot-macos-${{ matrix.arch }}
+          name: CodexPilot-macos-arm64
           path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app.tar.gz
+            src-tauri/target/${{ env.MACOS_TARGET }}/release/bundle/**/*.dmg
+            src-tauri/target/${{ env.MACOS_TARGET }}/release/bundle/**/*.app.tar.gz
           if-no-files-found: error
 
   windows:
