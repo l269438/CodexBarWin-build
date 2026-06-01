@@ -448,7 +448,12 @@ pub fn sync_auth_file(source_home: &Path, target_home: &Path) -> Result<(), Stri
 }
 
 fn spawn_codex_login(home_path: &Path) -> Result<std::process::Child, std::io::Error> {
-    let binary = resolve_codex_binary().unwrap_or_else(|| PathBuf::from("codex"));
+    let binary = resolve_codex_binary().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Codex CLI binary could not be resolved",
+        )
+    })?;
     Command::new(binary)
         .arg("login")
         .env("CODEX_HOME", home_path)
@@ -516,7 +521,26 @@ pub fn resolve_codex_binary_from_path(
     push_codex_names(&mut candidates, PathBuf::from("/usr/local/bin"));
     push_codex_names(&mut candidates, PathBuf::from("/usr/bin"));
 
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file() && !is_windowsapps_codex_alias(candidate))
+}
+
+fn is_windowsapps_codex_alias(candidate: &Path) -> bool {
+    let is_codex_name = candidate
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("codex"));
+    if !is_codex_name {
+        return false;
+    }
+
+    candidate.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|part| part.eq_ignore_ascii_case("WindowsApps"))
+    })
 }
 
 fn push_codex_names(candidates: &mut Vec<PathBuf>, dir: PathBuf) {

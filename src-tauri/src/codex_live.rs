@@ -3,6 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use toml_edit::{DocumentMut, Item, Table, value};
+
+const OPENAI_PROVIDER_KEY: &str = "OpenAI";
 const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 pub fn default_codex_dir() -> PathBuf {
@@ -15,32 +18,11 @@ pub fn default_codex_dir() -> PathBuf {
 }
 
 pub fn build_takeover_config(port: u16, provider_name: &str, model: &str) -> String {
-    let proxy_base_url = format!("http://127.0.0.1:{port}/v1");
-    let model_value = if model.trim().is_empty() {
-        "deepseek-v4-flash"
-    } else {
-        model.trim()
-    };
-    let display_name = provider_display_name(provider_name, model_value);
-    let model = toml_string(model_value);
-    let display_name = toml_string(&display_name);
-    let proxy_base_url = toml_string(&proxy_base_url);
-    let token = toml_string(PROXY_TOKEN_PLACEHOLDER);
-
+    let mut doc = DocumentMut::new();
+    apply_takeover_config(&mut doc, port, provider_name, model);
     format!(
-        r#"# Managed by Codex API Switcher. Existing config.toml is backed up before takeover.
-model_provider = "codex-api-switcher"
-model = {model}
-model_reasoning_effort = "high"
-disable_response_storage = true
-
-[model_providers.codex-api-switcher]
-name = {display_name}
-base_url = {proxy_base_url}
-wire_api = "responses"
-requires_openai_auth = true
-experimental_bearer_token = {token}
-"#
+        "# Managed by Codex API Switcher. Existing config.toml is backed up before takeover.\n{}",
+        doc
     )
 }
 
@@ -56,19 +38,44 @@ pub fn write_takeover_config(
 ) -> anyhow::Result<()> {
     fs::create_dir_all(codex_dir)?;
     backup_existing_config(codex_dir)?;
-    let config = build_takeover_config(port, provider_name, model);
-    config.parse::<toml_edit::DocumentMut>()?;
-    fs::write(codex_dir.join("config.toml"), config)?;
+    let config_path = codex_dir.join("config.toml");
+    let mut config = if config_path.exists() {
+        fs::read_to_string(&config_path)?.parse::<DocumentMut>()?
+    } else {
+        DocumentMut::new()
+    };
+    apply_takeover_config(&mut config, port, provider_name, model);
+    fs::write(config_path, config.to_string())?;
     Ok(())
 }
 
-fn provider_display_name(provider_name: &str, model: &str) -> String {
-    let provider_name = provider_name.trim();
-    if provider_name.is_empty() {
-        model.to_string()
+fn apply_takeover_config(doc: &mut DocumentMut, port: u16, _provider_name: &str, model: &str) {
+    let proxy_base_url = format!("http://127.0.0.1:{port}/v1");
+    let model_value = if model.trim().is_empty() {
+        "deepseek-v4-flash"
     } else {
-        format!("{provider_name} · {model}")
+        model.trim()
+    };
+
+    doc["model_provider"] = value(OPENAI_PROVIDER_KEY);
+    doc["model"] = value(model_value);
+    doc["model_reasoning_effort"] = value("high");
+    doc["disable_response_storage"] = value(true);
+
+    if !doc.as_table().contains_key("model_providers") {
+        doc["model_providers"] = Item::Table(Table::new());
     }
+    if let Some(providers) = doc["model_providers"].as_table_like_mut() {
+        providers.remove("codex-api-switcher");
+    }
+
+    let mut provider = Table::new();
+    provider["name"] = value("OpenAI");
+    provider["base_url"] = value(proxy_base_url);
+    provider["wire_api"] = value("responses");
+    provider["requires_openai_auth"] = value(true);
+    provider["experimental_bearer_token"] = value(PROXY_TOKEN_PLACEHOLDER);
+    doc["model_providers"][OPENAI_PROVIDER_KEY] = Item::Table(provider);
 }
 
 pub fn restore_original_config(codex_dir: &Path) -> anyhow::Result<()> {
@@ -114,10 +121,10 @@ fn backup_existing_config(codex_dir: &Path) -> anyhow::Result<()> {
 }
 
 fn is_switcher_config(text: &str) -> bool {
-    text.contains(r#"model_provider = "codex-api-switcher""#)
-        && text.contains("[model_providers.codex-api-switcher]")
-}
-
-fn toml_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+    let legacy = text.contains(r#"model_provider = "codex-api-switcher""#)
+        && text.contains("[model_providers.codex-api-switcher]");
+    let managed_openai = text.contains(r#"experimental_bearer_token = "PROXY_MANAGED""#)
+        && text.contains("requires_openai_auth = true")
+        && text.contains(r#"base_url = "http://127.0.0.1:"#);
+    legacy || managed_openai
 }

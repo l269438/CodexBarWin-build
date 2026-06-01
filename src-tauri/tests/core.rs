@@ -31,11 +31,14 @@ fn windows_release_build_uses_gui_subsystem() {
 fn takeover_config_points_codex_to_local_responses_proxy() {
     let config = build_takeover_config(15721, "DeepSeek", "deepseek-v4-flash");
 
+    assert!(config.contains(r#"model_provider = "OpenAI""#));
+    assert!(config.contains("[model_providers.OpenAI]"));
     assert!(config.contains("base_url = \"http://127.0.0.1:15721/v1\""));
     assert!(config.contains("wire_api = \"responses\""));
+    assert!(config.contains("requires_openai_auth = true"));
     assert!(config.contains("experimental_bearer_token = \"PROXY_MANAGED\""));
     assert!(config.contains("model = \"deepseek-v4-flash\""));
-    assert!(config.contains("name = \"DeepSeek · deepseek-v4-flash\""));
+    assert!(config.contains("name = \"OpenAI\""));
 }
 
 #[test]
@@ -265,6 +268,43 @@ fn codex_binary_resolution_finds_nvm_install_when_desktop_path_is_minimal() {
     let resolved = resolve_codex_binary_from_path(Some("/usr/bin:/bin"), Some(temp.path()));
 
     assert_eq!(resolved.as_deref(), Some(codex_path.as_path()));
+}
+
+#[test]
+fn codex_binary_resolution_ignores_windowsapps_alias_when_real_cli_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let windowsapps_codex = temp.path().join("WindowsApps").join("codex");
+    std::fs::create_dir_all(windowsapps_codex.parent().unwrap()).unwrap();
+    std::fs::write(&windowsapps_codex, "alias").unwrap();
+
+    let real_codex = temp
+        .path()
+        .join(".nvm")
+        .join("versions")
+        .join("node")
+        .join("v22.22.3")
+        .join("bin")
+        .join("codex");
+    std::fs::create_dir_all(real_codex.parent().unwrap()).unwrap();
+    std::fs::write(&real_codex, "#!/bin/sh\n").unwrap();
+
+    let path_env = std::env::join_paths([windowsapps_codex.parent().unwrap()]).unwrap();
+    let resolved = resolve_codex_binary_from_path(path_env.to_str(), Some(temp.path()));
+
+    assert_eq!(resolved.as_deref(), Some(real_codex.as_path()));
+}
+
+#[test]
+fn codex_binary_resolution_rejects_windowsapps_alias_without_real_cli() {
+    let temp = tempfile::tempdir().unwrap();
+    let windowsapps_codex = temp.path().join("WindowsApps").join("codex");
+    std::fs::create_dir_all(windowsapps_codex.parent().unwrap()).unwrap();
+    std::fs::write(&windowsapps_codex, "alias").unwrap();
+
+    let path_env = std::env::join_paths([windowsapps_codex.parent().unwrap()]).unwrap();
+    let resolved = resolve_codex_binary_from_path(path_env.to_str(), Some(temp.path()));
+
+    assert_eq!(resolved, None);
 }
 
 #[test]
@@ -503,8 +543,41 @@ fn writing_takeover_config_backs_up_existing_config_once() {
     let backup = std::fs::read_to_string(backup_path).unwrap();
     assert_eq!(backup, "model = \"gpt-5\"\n");
     let current = std::fs::read_to_string(config_path).unwrap();
+    assert!(current.contains(r#"model_provider = "OpenAI""#));
+    assert!(current.contains("[model_providers.OpenAI]"));
     assert!(current.contains("model = \"another-model\""));
-    assert!(current.contains("name = \"XIAOMI · another-model\""));
+    assert!(current.contains("name = \"OpenAI\""));
+}
+
+#[test]
+fn writing_takeover_config_preserves_unrelated_plugin_sections() {
+    let temp = tempfile::tempdir().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+model = "gpt-5.5"
+
+[plugins."github@openai-curated"]
+enabled = true
+
+[desktop]
+followUpQueueMode = "steer"
+"#,
+    )
+    .unwrap();
+
+    write_takeover_config(&codex_dir, 15721, "DeepSeek", "deepseek-v4-flash").unwrap();
+
+    let current = std::fs::read_to_string(config_path).unwrap();
+    assert!(current.contains(r#"[plugins."github@openai-curated"]"#));
+    assert!(current.contains("enabled = true"));
+    assert!(current.contains("[desktop]"));
+    assert!(current.contains(r#"followUpQueueMode = "steer""#));
+    assert!(current.contains(r#"model_provider = "OpenAI""#));
+    assert!(current.contains("[model_providers.OpenAI]"));
 }
 
 #[test]
