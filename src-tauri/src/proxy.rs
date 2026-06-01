@@ -256,6 +256,15 @@ struct StreamState {
     reasoning: String,
     usage: Option<Value>,
     finish_reason: Option<String>,
+    tool_calls: Vec<StreamToolCall>,
+}
+
+#[derive(Default, Clone)]
+struct StreamToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+    output_added: bool,
 }
 
 fn chat_sse_to_responses_sse(
@@ -286,11 +295,12 @@ fn chat_sse_to_responses_sse(
                     continue;
                 }
                 if data.trim() == "[DONE]" {
-                    history.record_stream_response(
+                    history.record_stream_response_with_tool_calls(
                         &state.response_id,
                         request_messages.clone(),
                         &state.text,
                         &state.reasoning,
+                        state.chat_tool_calls(),
                     ).await;
                     for event in finalize_stream(&mut state) {
                         yield Ok(event);
@@ -305,15 +315,67 @@ fn chat_sse_to_responses_sse(
                 }
             }
         }
-        history.record_stream_response(
+        history.record_stream_response_with_tool_calls(
             &state.response_id,
             request_messages,
             &state.text,
             &state.reasoning,
+            state.chat_tool_calls(),
         ).await;
         for event in finalize_stream(&mut state) {
             yield Ok(event);
         }
+    }
+}
+
+impl StreamState {
+    fn chat_tool_calls(&self) -> Vec<Value> {
+        self.tool_calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.has_content())
+            .map(|(index, call)| call.to_chat_tool_call(index))
+            .collect()
+    }
+}
+
+impl StreamToolCall {
+    fn has_content(&self) -> bool {
+        !self.id.is_empty() || !self.name.is_empty() || !self.arguments.is_empty()
+    }
+
+    fn call_id(&self, index: usize) -> String {
+        if self.id.is_empty() {
+            format!("call_{index}")
+        } else {
+            self.id.clone()
+        }
+    }
+
+    fn item_id(&self, index: usize) -> String {
+        format!("fc_{}", self.call_id(index))
+    }
+
+    fn to_chat_tool_call(&self, index: usize) -> Value {
+        json!({
+            "id": self.call_id(index),
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": self.arguments,
+            }
+        })
+    }
+
+    fn to_response_item(&self, index: usize, status: &str) -> Value {
+        json!({
+            "id": self.item_id(index),
+            "type": "function_call",
+            "status": status,
+            "call_id": self.call_id(index),
+            "name": self.name,
+            "arguments": self.arguments,
+        })
     }
 }
 
@@ -436,11 +498,77 @@ fn handle_chat_chunk(state: &mut StreamState, chunk: &Value) -> Vec<Bytes> {
                 ));
             }
         }
+        if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            events.extend(handle_chat_tool_call_deltas(state, tool_calls));
+        }
     }
     if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
         state.finish_reason = Some(reason.to_string());
     }
     events
+}
+
+fn handle_chat_tool_call_deltas(state: &mut StreamState, tool_calls: &[Value]) -> Vec<Bytes> {
+    let mut events = Vec::new();
+    for (fallback_index, delta) in tool_calls.iter().enumerate() {
+        let index = delta
+            .get("index")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(fallback_index);
+        while state.tool_calls.len() <= index {
+            state.tool_calls.push(StreamToolCall::default());
+        }
+
+        let output_index = tool_call_output_index(state, index);
+        let call = &mut state.tool_calls[index];
+        if let Some(id) = delta
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            call.id = id.to_string();
+        }
+        if let Some(name) = delta
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        {
+            call.name = name.to_string();
+        }
+
+        if !call.output_added {
+            call.output_added = true;
+            events.push(sse_event(
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": call.to_response_item(index, "in_progress")
+                }),
+            ));
+        }
+
+        if let Some(arguments) = delta.pointer("/function/arguments").and_then(Value::as_str) {
+            if !arguments.is_empty() {
+                call.arguments.push_str(arguments);
+                events.push(sse_event(
+                    "response.function_call_arguments.delta",
+                    json!({
+                        "type": "response.function_call_arguments.delta",
+                        "item_id": call.item_id(index),
+                        "output_index": output_index,
+                        "delta": arguments
+                    }),
+                ));
+            }
+        }
+    }
+    events
+}
+
+fn tool_call_output_index(state: &StreamState, tool_index: usize) -> usize {
+    usize::from(!state.reasoning.is_empty()) + usize::from(!state.text.is_empty()) + tool_index
 }
 
 fn finalize_stream(state: &mut StreamState) -> Vec<Bytes> {
@@ -501,6 +629,32 @@ fn finalize_stream(state: &mut StreamState) -> Vec<Bytes> {
             }),
         ));
     }
+    for index in 0..state.tool_calls.len() {
+        let call = &state.tool_calls[index];
+        if !call.has_content() {
+            continue;
+        }
+        let output_index = output.len();
+        let item = call.to_response_item(index, "completed");
+        events.push(sse_event(
+            "response.function_call_arguments.done",
+            json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": call.item_id(index),
+                "output_index": output_index,
+                "arguments": call.arguments
+            }),
+        ));
+        events.push(sse_event(
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": item
+            }),
+        ));
+        output.push(item);
+    }
     events.push(sse_event(
         "response.completed",
         json!({
@@ -559,4 +713,65 @@ fn sse_event(event: &str, data: Value) -> Bytes {
         "event: {event}\ndata: {}\n\n",
         serde_json::to_string(&data).unwrap_or_default()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[tokio::test]
+    async fn streamed_chat_tool_call_emits_response_function_call_and_records_history() {
+        let history = Arc::new(ConversationHistoryStore::default());
+        let request_messages = vec![json!({"role": "user", "content": "read file"})];
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl_tool\",\"created\":123,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl_tool\",\"created\":123,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"README.md\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl_tool\",\"created\":123,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let upstream = stream::iter(vec![Ok::<Bytes, reqwest::Error>(Bytes::from(sse))]);
+
+        let chunks = chat_sse_to_responses_sse(upstream, history.clone(), request_messages)
+            .collect::<Vec<_>>()
+            .await;
+        let output = chunks
+            .into_iter()
+            .map(|chunk| String::from_utf8(chunk.unwrap().to_vec()).unwrap())
+            .collect::<String>();
+
+        assert!(output.contains("response.function_call_arguments.delta"));
+        assert!(output.contains("\"type\":\"function_call\""));
+        assert!(output.contains("\"call_id\":\"call_1\""));
+        assert!(output.contains("\"name\":\"read_file\""));
+        assert!(output.contains("\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\""));
+
+        let responses_request = json!({
+            "previous_response_id": "resp_chatcmpl_tool",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "file text"
+            }]
+        });
+        let mut chat_request = responses_to_chat_completions(
+            responses_request.clone(),
+            Some("deepseek-v4-flash"),
+            None,
+        )
+        .unwrap();
+
+        history
+            .enrich_chat_request(&responses_request, &mut chat_request)
+            .await;
+
+        assert_eq!(chat_request["messages"][1]["role"], "assistant");
+        assert_eq!(chat_request["messages"][1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(
+            chat_request["messages"][1]["tool_calls"][0]["function"]["name"],
+            "read_file"
+        );
+        assert_eq!(chat_request["messages"][2]["role"], "tool");
+        assert_eq!(chat_request["messages"][2]["tool_call_id"], "call_1");
+    }
 }

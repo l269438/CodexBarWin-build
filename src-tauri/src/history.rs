@@ -80,15 +80,40 @@ impl ConversationHistoryStore {
         text: &str,
         reasoning: &str,
     ) -> Option<String> {
-        if text.is_empty() && reasoning.is_empty() {
+        self.record_stream_response_with_tool_calls(
+            response_id,
+            request_messages,
+            text,
+            reasoning,
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn record_stream_response_with_tool_calls(
+        &self,
+        response_id: &str,
+        request_messages: Vec<Value>,
+        text: &str,
+        reasoning: &str,
+        tool_calls: Vec<Value>,
+    ) -> Option<String> {
+        if text.is_empty() && reasoning.is_empty() && tool_calls.is_empty() {
             return None;
         }
         let mut message = json!({
             "role": "assistant",
-            "content": text,
+            "content": if text.is_empty() && !tool_calls.is_empty() {
+                Value::Null
+            } else {
+                json!(text)
+            },
         });
         if !reasoning.is_empty() {
             message["reasoning_content"] = json!(reasoning);
+        }
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(tool_calls);
         }
         self.record_messages(response_id.to_string(), request_messages, message)
             .await;

@@ -7,6 +7,10 @@ edition = "2024"
 name = "codex_api_switcher"
 path = "src/lib.rs"
 
+[[bin]]
+name = "CodexPilot"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 async-stream = "0.3"
