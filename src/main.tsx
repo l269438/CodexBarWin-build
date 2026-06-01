@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
+const appIconUrl = new URL("../src-tauri/icons/codexpilot-icon.png", import.meta.url).href;
+
 type ApiFormat = "open_ai_chat" | "open_ai_responses";
 
 interface Provider {
@@ -756,7 +758,9 @@ function App() {
       <section className="tray-window" aria-label="CodexPilot">
         <header className="pilot-header">
           <div className="brand-lockup">
-            <div className="brand-mark">CP</div>
+            <div className="brand-mark">
+              <img alt="" src={appIconUrl} />
+            </div>
             <div className="brand-copy">
               <h1>CodexPilot</h1>
               <p>{status?.running ? "代理运行中" : "本地控制台"}</p>
