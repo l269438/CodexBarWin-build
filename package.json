@@ -1,6 +1,6 @@
 {
   "name": "codex-api-switcher",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "A compact Codex provider and account controller.",
   "type": "module",
   "scripts": {
