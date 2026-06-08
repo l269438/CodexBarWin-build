@@ -28,6 +28,75 @@ fn windows_release_build_uses_gui_subsystem() {
 }
 
 #[test]
+fn main_window_locks_width_but_allows_height_resize() {
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let window = config["app"]["windows"]
+        .as_array()
+        .and_then(|windows| windows.first())
+        .unwrap();
+
+    assert_eq!(window["width"], 390);
+    assert_eq!(window["height"], 760);
+    assert_eq!(window["minWidth"], 390);
+    assert_eq!(window["maxWidth"], 390);
+    assert_eq!(window["minHeight"], 660);
+    assert!(window.get("maxHeight").is_none());
+    assert_eq!(window["resizable"], true);
+}
+
+#[test]
+fn desktop_shell_creates_real_system_tray() {
+    let main_rs = include_str!("../src/main.rs");
+
+    assert!(main_rs.contains("TrayIconBuilder::with_id(TRAY_ID)"));
+    assert!(main_rs.contains("show_menu_on_left_click(false)"));
+    assert!(main_rs.contains("on_tray_icon_event"));
+    assert!(main_rs.contains("CloseRequested"));
+    assert!(main_rs.contains("api.prevent_close()"));
+    assert!(main_rs.contains("update_tray_usage_tooltip"));
+}
+
+#[test]
+fn tray_usage_bubble_opens_accounts_usage_view() {
+    let main_rs = include_str!("../src/main.rs");
+    let renderer = include_str!("../../src/main.tsx");
+
+    assert!(main_rs.contains("show-usage-bubble"));
+    assert!(main_rs.contains("codexpilot://show-usage-bubble"));
+    assert!(main_rs.contains("USAGE_BUBBLE_WINDOW_LABEL"));
+    assert!(main_rs.contains("show_usage_bubble_window"));
+    assert!(renderer.contains("listen(\"codexpilot://show-usage-bubble\""));
+    assert!(renderer.contains("UsageBubbleApp"));
+    assert!(renderer.contains("usage-bubble-quota-row"));
+    assert!(renderer.contains("usage-bubble-actions"));
+    assert!(renderer.contains("open_main_panel"));
+    assert!(renderer.contains("open_accounts_panel"));
+    assert!(renderer.contains(r#"get("view") === "usage-bubble""#));
+    assert!(renderer.contains("setActiveWorkspace(\"accounts\")"));
+}
+
+#[test]
+fn tauri_config_declares_hidden_usage_bubble_window() {
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let windows = config["app"]["windows"].as_array().unwrap();
+    let bubble = windows
+        .iter()
+        .find(|window| window["label"] == "usage-bubble")
+        .expect("usage bubble window should be declared");
+
+    assert_eq!(bubble["url"], "/?view=usage-bubble");
+    assert_eq!(bubble["width"], 430);
+    assert_eq!(bubble["height"], 306);
+    assert_eq!(bubble["visible"], false);
+    assert_eq!(bubble["decorations"], false);
+    assert_eq!(bubble["resizable"], false);
+    assert_eq!(bubble["alwaysOnTop"], true);
+    assert_eq!(bubble["skipTaskbar"], true);
+}
+
+#[test]
 fn takeover_config_points_codex_to_local_responses_proxy() {
     let config = build_takeover_config(15721, "DeepSeek", "deepseek-v4-flash");
 

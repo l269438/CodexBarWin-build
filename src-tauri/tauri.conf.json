@@ -13,11 +13,29 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "CodexPilot",
         "width": 390,
-        "height": 660,
-        "minWidth": 360,
-        "minHeight": 520
+        "height": 760,
+        "minWidth": 390,
+        "maxWidth": 390,
+        "minHeight": 660,
+        "resizable": true,
+        "maximizable": false
+      },
+      {
+        "label": "usage-bubble",
+        "title": "CodexPilot 额度",
+        "url": "/?view=usage-bubble",
+        "width": 430,
+        "height": 306,
+        "visible": false,
+        "decorations": false,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
       }
     ],
     "security": {

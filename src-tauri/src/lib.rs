@@ -5,6 +5,7 @@ pub mod network_env;
 pub mod official_auth;
 pub mod official_backup;
 pub mod proxy;
+pub mod sessions;
 pub mod store;
 pub mod transform;
 pub mod usage;
@@ -19,6 +20,10 @@ pub use network_env::NetworkEnvStatus;
 pub use official_auth::ChatGptAuthStatus;
 pub use official_backup::OriginalBackupStatus;
 use serde::{Deserialize, Serialize};
+pub use sessions::{
+    CodexSessionList, CodexSessionPreview, CopySessionResult, DeleteProjectSessionsResult,
+    DeleteSessionResult, DeletedSessionEntry, RestoreDeletedSessionsResult,
+};
 pub use store::{AppConfig, Provider};
 use tokio::sync::{Mutex, RwLock};
 
@@ -418,6 +423,102 @@ impl AppState {
         let set = ManagedCodexAccountSet::new(set.accounts);
         store.save_accounts(&set)?;
         Ok(self.load_account_projection().await)
+    }
+
+    pub fn list_codex_sessions(&self) -> Result<CodexSessionList, String> {
+        let codex_home = codex_live::default_codex_dir();
+        let backup_root = sessions::default_session_backup_root(&codex_home);
+        let session_summaries =
+            sessions::list_sessions(&codex_home).map_err(|error| error.to_string())?;
+        let projects = sessions::group_visible_sessions_by_project_with_codex_order(
+            &codex_home,
+            &backup_root,
+            &session_summaries,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(CodexSessionList {
+            sessions: session_summaries,
+            projects,
+            codex_running: sessions::is_codex_running(),
+        })
+    }
+
+    pub fn preview_codex_session(&self, session_id: String) -> Result<CodexSessionPreview, String> {
+        sessions::preview_session(&codex_live::default_codex_dir(), &session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn delete_codex_session(
+        &self,
+        session_id: String,
+        confirmed: bool,
+    ) -> Result<DeleteSessionResult, String> {
+        let codex_home = codex_live::default_codex_dir();
+        let backup_root = sessions::default_session_backup_root(&codex_home);
+        let mut result =
+            sessions::delete_session(&codex_home, &backup_root, &session_id, confirmed)
+                .map_err(|error| error.to_string())?;
+        result.codex_running = sessions::is_codex_running();
+        Ok(result)
+    }
+
+    pub fn delete_codex_project_sessions(
+        &self,
+        project_path: String,
+        confirmed: bool,
+    ) -> Result<DeleteProjectSessionsResult, String> {
+        let codex_home = codex_live::default_codex_dir();
+        let backup_root = sessions::default_session_backup_root(&codex_home);
+        let mut result =
+            sessions::delete_project_sessions(&codex_home, &backup_root, &project_path, confirmed)
+                .map_err(|error| error.to_string())?;
+        result.codex_running = sessions::is_codex_running();
+        Ok(result)
+    }
+
+    pub fn list_deleted_codex_sessions(&self) -> Result<Vec<DeletedSessionEntry>, String> {
+        let codex_home = codex_live::default_codex_dir();
+        let backup_root = sessions::default_session_backup_root(&codex_home);
+        sessions::list_deleted_session_entries(&backup_root).map_err(|error| error.to_string())
+    }
+
+    pub fn restore_deleted_codex_sessions(
+        &self,
+        deletion_id: String,
+        confirmed: bool,
+    ) -> Result<RestoreDeletedSessionsResult, String> {
+        let codex_home = codex_live::default_codex_dir();
+        let backup_root = sessions::default_session_backup_root(&codex_home);
+        let mut result =
+            sessions::restore_deleted_sessions(&codex_home, &backup_root, &deletion_id, confirmed)
+                .map_err(|error| error.to_string())?;
+        result.codex_running = sessions::is_codex_running();
+        Ok(result)
+    }
+
+    pub fn copy_codex_session_to_account(
+        &self,
+        session_id: String,
+        target_account_id: String,
+    ) -> Result<CopySessionResult, String> {
+        if target_account_id == "live" {
+            return Err("target must be another managed Codex instance".to_string());
+        }
+        let store = FileManagedCodexAccountStore::default();
+        let set = store.load_accounts()?;
+        let account = set
+            .accounts
+            .iter()
+            .find(|account| account.id == target_account_id)
+            .ok_or_else(|| "target managed account is missing".to_string())?;
+        let mut result = sessions::copy_session_to_codex_home(
+            &codex_live::default_codex_dir(),
+            std::path::Path::new(&account.managed_home_path),
+            &session_id,
+        )
+        .map_err(|error| error.to_string())?;
+        result.codex_running = sessions::is_codex_running();
+        Ok(result)
     }
 
     async fn persist_active_source_if_changed(&self, source: CodexActiveSource) {

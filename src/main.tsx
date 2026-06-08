@@ -1,19 +1,32 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
+  AlertTriangle,
   ArrowLeftRight,
   Box,
+  CalendarDays,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Clock3,
+  Copy,
+  Eye,
+  FileText,
   Folder,
+  LayoutPanelLeft,
   KeyRound,
   Plus,
   Power,
   RefreshCw,
   RotateCcw,
   Save,
+  Settings,
   Shield,
   Trash2,
+  UserRound,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
@@ -110,7 +123,70 @@ interface NetworkEnvStatus {
   envPath: string;
 }
 
-type Workspace = "accounts" | "api";
+interface CodexSessionSummary {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  activityRank: number;
+  sidebarOrder: number;
+  messageCount: number;
+  fileSizeBytes: number;
+  relativePath: string;
+  projectPath: string;
+  projectName: string;
+}
+
+interface CodexSessionProjectGroup {
+  projectName: string;
+  projectPath: string;
+  updatedAt: number;
+  sessions: CodexSessionSummary[];
+}
+
+interface CodexSessionList {
+  sessions: CodexSessionSummary[];
+  projects: CodexSessionProjectGroup[];
+  codexRunning: boolean;
+}
+
+interface DeleteSessionResult {
+  backupPath: string;
+  codexRunning: boolean;
+}
+
+interface DeletedSessionBackup {
+  id: string;
+  title: string;
+  relativePath: string;
+  backupPath: string;
+  projectPath: string;
+  projectName: string;
+}
+
+interface DeletedSessionEntry {
+  id: string;
+  kind: "session" | "project" | string;
+  name: string;
+  projectPath: string;
+  projectName: string;
+  deletedAt: number;
+  restoredAt?: number | null;
+  sessions: DeletedSessionBackup[];
+}
+
+interface RestoreDeletedSessionsResult {
+  restoredPaths: string[];
+  restoredCount: number;
+  codexRunning: boolean;
+}
+
+interface CopySessionResult {
+  targetPath: string;
+  codexRunning: boolean;
+}
+
+type Workspace = "accounts" | "api" | "sessions";
 
 const emptyProvider = (): Provider => ({
   id: crypto.randomUUID(),
@@ -184,6 +260,14 @@ let browserNetworkEnv: NetworkEnvStatus = {
   envPath: "~/.codex/.env",
 };
 
+let browserSessions: CodexSessionList = {
+  sessions: [],
+  projects: [],
+  codexRunning: false,
+};
+
+let browserDeletedSessions: DeletedSessionEntry[] = [];
+
 function hasTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
 }
@@ -198,6 +282,12 @@ async function callCommand<T>(command: string, args?: Record<string, unknown>): 
       return structuredClone(browserConfig) as T;
     case "get_proxy_status":
       return structuredClone(browserStatus) as T;
+    case "update_tray_usage_tooltip":
+      return undefined as T;
+    case "open_main_panel":
+      return undefined as T;
+    case "open_accounts_panel":
+      return undefined as T;
     case "get_original_backup_status":
       return structuredClone(browserOriginalBackup) as T;
     case "get_chatgpt_auth_status":
@@ -355,6 +445,95 @@ async function callCommand<T>(command: string, args?: Record<string, unknown>): 
     }
     case "refresh_managed_account":
       return structuredClone(browserAccounts) as T;
+    case "list_codex_sessions":
+      return structuredClone(browserSessions) as T;
+    case "list_deleted_codex_sessions":
+      return structuredClone(browserDeletedSessions) as T;
+    case "copy_codex_session_to_account":
+      return {
+        targetPath: "~/.codex-managed/sessions/copied.jsonl",
+        codexRunning: browserSessions.codexRunning,
+      } as T;
+    case "delete_codex_session": {
+      if (!args?.confirmed) throw new Error("session deletion requires explicit confirmation");
+      const sessionId = args?.sessionId as string;
+      browserSessions = {
+        ...browserSessions,
+        sessions: browserSessions.sessions.filter((session) => session.id !== sessionId),
+      };
+      browserDeletedSessions = [
+        {
+          id: crypto.randomUUID(),
+          kind: "session",
+          name: "预览会话",
+          projectPath: "",
+          projectName: "预览",
+          deletedAt: Math.floor(Date.now() / 1000),
+          restoredAt: null,
+          sessions: [],
+        },
+        ...browserDeletedSessions,
+      ];
+      return {
+        backupPath: "~/.codex/backups/sessions/preview/copied.jsonl",
+        codexRunning: browserSessions.codexRunning,
+      } as T;
+    }
+    case "delete_codex_project_sessions": {
+      if (!args?.confirmed) throw new Error("project deletion requires explicit confirmation");
+      const projectPath = args?.projectPath as string;
+      const deletedProject = browserSessions.projects.find(
+        (project) => project.projectPath === projectPath,
+      );
+      const deletedSessions = browserSessions.sessions.filter(
+        (session) => session.projectPath === projectPath,
+      );
+      browserSessions = {
+        ...browserSessions,
+        sessions: browserSessions.sessions.filter((session) => session.projectPath !== projectPath),
+        projects: browserSessions.projects.filter((project) => project.projectPath !== projectPath),
+      };
+      browserDeletedSessions = [
+        {
+          id: crypto.randomUUID(),
+          kind: "project",
+          name: deletedProject?.projectName || deletedSessions[0]?.projectName || "预览项目",
+          projectPath,
+          projectName: deletedProject?.projectName || deletedSessions[0]?.projectName || "预览项目",
+          deletedAt: Math.floor(Date.now() / 1000),
+          restoredAt: null,
+          sessions: deletedSessions.map((session) => ({
+            id: session.id,
+            title: session.title,
+            relativePath: session.relativePath,
+            backupPath: `~/.codex/backups/sessions/preview/${session.relativePath}`,
+            projectPath: session.projectPath,
+            projectName: session.projectName,
+          })),
+        },
+        ...browserDeletedSessions,
+      ];
+      return {
+        backupPaths: deletedSessions.map(
+          (session) => `~/.codex/backups/sessions/preview/${session.relativePath}`,
+        ),
+        deletedCount: deletedSessions.length,
+        codexRunning: browserSessions.codexRunning,
+      } as T;
+    }
+    case "restore_deleted_codex_sessions": {
+      if (!args?.confirmed) throw new Error("session restore requires explicit confirmation");
+      const deletionId = args?.deletionId as string;
+      const entry = browserDeletedSessions.find((item) => item.id === deletionId);
+      browserDeletedSessions = browserDeletedSessions.filter((item) => item.id !== deletionId);
+      return {
+        restoredPaths: entry?.sessions.map((session) => session.relativePath) ?? [],
+        restoredCount: entry?.sessions.length ?? 0,
+        codexRunning: browserSessions.codexRunning,
+      } as T;
+    }
+    case "open_codex_session":
+      return undefined as T;
     case "open_codex_home":
       return undefined as T;
     default:
@@ -366,6 +545,10 @@ function formatUsagePercent(value: number | null) {
   return value === null ? "--" : `${Math.round(value)}%`;
 }
 
+function formatUsageCount(value: number | null) {
+  return value === null ? "--" : String(Math.round(value));
+}
+
 function formatBackupTime(value: number | null | undefined) {
   if (!value) return "尚未备份";
   return new Intl.DateTimeFormat("zh-CN", {
@@ -374,6 +557,20 @@ function formatBackupTime(value: number | null | undefined) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value * 1000));
+}
+
+function formatSessionTime(value: number | null | undefined) {
+  if (!value) return "未知时间";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value * 1000));
+}
+
+function sessionProjectKey(project: CodexSessionProjectGroup) {
+  return project.projectPath || project.projectName;
 }
 
 function usageLabel(usage: AccountUsageSnapshot | undefined) {
@@ -444,6 +641,192 @@ function uniqueDisplayAccounts(accounts: VisibleCodexAccount[]) {
   return Array.from(byIdentity.values());
 }
 
+function UsageBubbleApp() {
+  const [account, setAccount] = React.useState<VisibleCodexAccount | null>(null);
+  const [usage, setUsage] = React.useState<AccountUsageSnapshot>({
+    sessionUsedPercent: null,
+    sessionRemainingPercent: null,
+    weeklyUsedPercent: null,
+    weeklyRemainingPercent: null,
+    status: "refreshing",
+  });
+  const [status, setStatus] = React.useState<ProxyStatus | null>(null);
+
+  const loadBubble = React.useCallback(async () => {
+    document.body.classList.add("usage-bubble-body");
+    const [nextAccounts, nextStatus] = await Promise.all([
+      callCommand<CodexVisibleAccountProjection>("load_account_projection"),
+      callCommand<ProxyStatus>("get_proxy_status"),
+    ]);
+    const activeAccount = nextAccounts.accounts.find((item) => item.isActive) ?? null;
+    setAccount(activeAccount);
+    setStatus(nextStatus);
+
+    if (!activeAccount) {
+      setUsage({
+        sessionUsedPercent: null,
+        sessionRemainingPercent: null,
+        weeklyUsedPercent: null,
+        weeklyRemainingPercent: null,
+        status: "unavailable",
+      });
+      return;
+    }
+
+    try {
+      const summary = await callCommand<CodexUsageSummary>("load_account_usage", {
+        accountId: activeAccount.id,
+      });
+      setUsage({
+        sessionUsedPercent: summary.session?.usedPercent ?? null,
+        sessionRemainingPercent: summary.session?.remainingPercent ?? null,
+        weeklyUsedPercent: summary.weekly?.usedPercent ?? null,
+        weeklyRemainingPercent: summary.weekly?.remainingPercent ?? null,
+        status: "ready",
+      });
+    } catch {
+      setUsage({
+        sessionUsedPercent: null,
+        sessionRemainingPercent: null,
+        weeklyUsedPercent: null,
+        weeklyRemainingPercent: null,
+        status: "unavailable",
+      });
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadBubble();
+    return () => {
+      document.body.classList.remove("usage-bubble-body");
+    };
+  }, [loadBubble]);
+
+  React.useEffect(() => {
+    if (!hasTauriRuntime()) return;
+    let unlisten: (() => void) | null = null;
+    void listen("codexpilot://show-usage-bubble", () => {
+      setUsage((current) => ({ ...current, status: "refreshing" }));
+      void loadBubble();
+    }).then((handler) => {
+      unlisten = handler;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, [loadBubble]);
+
+  const proxyLabel =
+    usage.status === "refreshing" ? "刷新中" : status?.running ? "代理中" : "官方";
+  const sessionRemaining = formatUsagePercent(usage.sessionRemainingPercent);
+  const weeklyRemaining = formatUsagePercent(usage.weeklyRemainingPercent);
+
+  async function refreshBubble() {
+    setUsage((current) => ({ ...current, status: "refreshing" }));
+    await loadBubble();
+  }
+
+  async function openMainPanel() {
+    await callCommand<void>("open_main_panel");
+  }
+
+  async function openAccountsPanel() {
+    await callCommand<void>("open_accounts_panel");
+  }
+
+  return (
+    <main className="usage-bubble-shell" aria-label="CodexPilot 额度气泡">
+      <section className="usage-bubble-header">
+        <img alt="" src={appIconUrl} />
+        <div className="usage-bubble-title">
+          <strong>CodexPilot</strong>
+          <button onClick={openAccountsPanel} title="切换账号" type="button">
+            <span>{account?.email ?? "未检测到账号"}</span>
+            <ChevronDown size={16} />
+          </button>
+        </div>
+        <span className={`usage-bubble-status ${status?.running ? "on" : ""}`}>
+          <i />
+          {proxyLabel}
+        </span>
+        <button className="usage-bubble-gear" onClick={openMainPanel} title="设置" type="button">
+          <Settings size={22} />
+        </button>
+      </section>
+
+      <section className="usage-bubble-quota-row" aria-label="会话额度">
+        <span className="usage-bubble-row-icon blue">
+          <Clock3 size={20} />
+        </span>
+        <div className="usage-bubble-row-copy">
+          <header>
+            <strong>会话额度</strong>
+            <span>
+              {sessionRemaining} <small>/ 100%</small>
+            </span>
+            <ChevronRight size={18} />
+          </header>
+          <i
+            style={
+              {
+                "--usage-fill": usageFill(usage.sessionRemainingPercent),
+              } as React.CSSProperties
+            }
+          />
+          <p>
+            剩余 {sessionRemaining} · {formatUsageCount(usage.sessionRemainingPercent)} / 100
+          </p>
+        </div>
+      </section>
+
+      <section className="usage-bubble-quota-row" aria-label="每周额度">
+        <span className="usage-bubble-row-icon green">
+          <CalendarDays size={20} />
+        </span>
+        <div className="usage-bubble-row-copy">
+          <header>
+            <strong>每周额度</strong>
+            <span>
+              {weeklyRemaining} <small>/ 100%</small>
+            </span>
+            <ChevronRight size={18} />
+          </header>
+          <i
+            style={
+              {
+                "--usage-fill": usageFill(usage.weeklyRemainingPercent),
+              } as React.CSSProperties
+            }
+          />
+          <p>
+            剩余 {weeklyRemaining} · {formatUsageCount(usage.weeklyRemainingPercent)} / 100 ·
+            重置于 6 天后
+          </p>
+        </div>
+      </section>
+
+      <section className="usage-bubble-actions" aria-label="快捷操作">
+        <button onClick={() => void refreshBubble()} type="button">
+          <RefreshCw size={19} />
+          <span>刷新</span>
+          <kbd>⌘R</kbd>
+        </button>
+        <button onClick={openMainPanel} type="button">
+          <LayoutPanelLeft size={19} />
+          <span>主面板</span>
+          <kbd>⌘O</kbd>
+        </button>
+        <button onClick={openAccountsPanel} type="button">
+          <UserRound size={19} />
+          <span>切换账号</span>
+          <kbd>⌘⇧A</kbd>
+        </button>
+      </section>
+    </main>
+  );
+}
+
 function App() {
   const [config, setConfig] = React.useState<AppConfig | null>(null);
   const [status, setStatus] = React.useState<ProxyStatus | null>(null);
@@ -452,23 +835,45 @@ function App() {
   const [originalBackup, setOriginalBackup] = React.useState<OriginalBackupStatus | null>(null);
   const [chatGptAuth, setChatGptAuth] = React.useState<ChatGptAuthStatus | null>(null);
   const [networkEnv, setNetworkEnv] = React.useState<NetworkEnvStatus | null>(null);
+  const [sessions, setSessions] = React.useState<CodexSessionList | null>(null);
+  const [deletedSessions, setDeletedSessions] = React.useState<DeletedSessionEntry[]>([]);
   const [activeWorkspace, setActiveWorkspace] = React.useState<Workspace>("accounts");
   const [selectedId, setSelectedId] = React.useState<string>("");
+  const [selectedProjectPath, setSelectedProjectPath] = React.useState<string>("");
+  const [selectedSessionId, setSelectedSessionId] = React.useState<string>("");
+  const [sessionTargetAccountId, setSessionTargetAccountId] = React.useState<string>("");
   const [draft, setDraft] = React.useState<Provider | null>(null);
   const [networkEndpoint, setNetworkEndpoint] = React.useState("127.0.0.1:7890");
   const [busy, setBusy] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [accountMessage, setAccountMessage] = React.useState("");
+  const [sessionMessage, setSessionMessage] = React.useState("");
+  const [pendingDeleteSession, setPendingDeleteSession] =
+    React.useState<CodexSessionSummary | null>(null);
+  const [showDeletedSessions, setShowDeletedSessions] = React.useState(false);
+  const [pendingRestoreDeletion, setPendingRestoreDeletion] =
+    React.useState<DeletedSessionEntry | null>(null);
 
   const load = React.useCallback(async () => {
-    const [nextConfig, nextStatus, nextAccounts, nextBackup, nextAuth, nextNetworkEnv] = await Promise.all([
+    const [
+      nextConfig,
+      nextStatus,
+      nextAccounts,
+      nextBackup,
+      nextAuth,
+      nextNetworkEnv,
+      nextSessions,
+      nextDeletedSessions,
+    ] = await Promise.all([
       callCommand<AppConfig>("get_app_config"),
       callCommand<ProxyStatus>("get_proxy_status"),
       callCommand<CodexVisibleAccountProjection>("load_account_projection"),
       callCommand<OriginalBackupStatus>("get_original_backup_status"),
       callCommand<ChatGptAuthStatus>("get_chatgpt_auth_status"),
       callCommand<NetworkEnvStatus>("get_network_env_status"),
+      callCommand<CodexSessionList>("list_codex_sessions"),
+      callCommand<DeletedSessionEntry[]>("list_deleted_codex_sessions"),
     ]);
     setConfig(nextConfig);
     setStatus(nextStatus);
@@ -476,6 +881,8 @@ function App() {
     setOriginalBackup(nextBackup);
     setChatGptAuth(nextAuth);
     setNetworkEnv(nextNetworkEnv);
+    setSessions(nextSessions);
+    setDeletedSessions(nextDeletedSessions);
     setNetworkEndpoint((current) =>
       current === "127.0.0.1:7890" && nextNetworkEnv.proxyEndpoint
         ? nextNetworkEnv.proxyEndpoint
@@ -490,16 +897,50 @@ function App() {
         : nextConfig.currentProviderId || nextConfig.providers[0]?.id || "";
       return id;
     });
+    setSelectedSessionId((currentSessionId) => {
+      const selectedStillExists = nextSessions.sessions.some(
+        (session) => session.id === currentSessionId,
+      );
+      return selectedStillExists ? currentSessionId : nextSessions.sessions[0]?.id ?? "";
+    });
+    setSelectedProjectPath((currentProjectPath) => {
+      const selectedStillExists = nextSessions.projects.some(
+        (project) => sessionProjectKey(project) === currentProjectPath,
+      );
+      return selectedStillExists
+        ? currentProjectPath
+        : nextSessions.projects[0]
+          ? sessionProjectKey(nextSessions.projects[0])
+          : "";
+    });
   }, []);
 
   React.useEffect(() => {
     void load();
   }, [load]);
 
+  React.useEffect(() => {
+    if (!hasTauriRuntime()) return;
+    let unlisten: (() => void) | null = null;
+    void listen("codexpilot://show-usage-bubble", () => {
+      setActiveWorkspace("accounts");
+      setAccountMessage("额度气泡已打开");
+      void load();
+    }).then((handler) => {
+      unlisten = handler;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, [load]);
+
   async function refreshApp(scope: Workspace = activeWorkspace) {
     setRefreshing(true);
     if (scope === "accounts") {
       setAccountMessage("正在刷新账号状态...");
+    } else if (scope === "sessions") {
+      setSessionMessage("正在刷新会话列表...");
     } else {
       setMessage("正在刷新接入状态...");
     }
@@ -507,6 +948,8 @@ function App() {
       await load();
       if (scope === "accounts") {
         setAccountMessage("账号状态已刷新");
+      } else if (scope === "sessions") {
+        setSessionMessage("会话列表已刷新");
       } else {
         setMessage("接入状态已刷新");
       }
@@ -514,6 +957,8 @@ function App() {
       const text = error instanceof Error ? error.message : String(error);
       if (scope === "accounts") {
         setAccountMessage(text);
+      } else if (scope === "sessions") {
+        setSessionMessage(text);
       } else {
         setMessage(text);
       }
@@ -594,6 +1039,20 @@ function App() {
     };
   }, [accountIds.join("\u0000")]);
 
+  const sessionTargetAccounts = React.useMemo(
+    () => accounts?.accounts.filter((account) => !account.isLive) ?? [],
+    [accounts],
+  );
+
+  React.useEffect(() => {
+    setSessionTargetAccountId((current) => {
+      if (sessionTargetAccounts.some((account) => account.id === current)) {
+        return current;
+      }
+      return sessionTargetAccounts[0]?.id ?? "";
+    });
+  }, [sessionTargetAccounts]);
+
   async function run<T>(action: () => Promise<T>, success: string) {
     setBusy(true);
     setMessage("");
@@ -618,6 +1077,21 @@ function App() {
       return result;
     } catch (error) {
       setAccountMessage(error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runSession<T>(action: () => Promise<T>, success: string) {
+    setBusy(true);
+    setSessionMessage("");
+    try {
+      const result = await action();
+      setSessionMessage(success);
+      return result;
+    } catch (error) {
+      setSessionMessage(error instanceof Error ? error.message : String(error));
       throw error;
     } finally {
       setBusy(false);
@@ -816,11 +1290,140 @@ function App() {
     setNetworkEnv(next);
   }
 
+  async function openSelectedSession() {
+    if (!selectedSessionId) return;
+    await runSession(
+      () => callCommand<void>("open_codex_session", { sessionId: selectedSessionId }),
+      "会话文件已定位",
+    );
+  }
+
+  async function copySelectedSession() {
+    if (!selectedSessionId) return;
+    if (!sessionTargetAccountId) {
+      setSessionMessage("暂无可复制的其他 Codex 实例");
+      return;
+    }
+    const result = await runSession(
+      () =>
+        callCommand<CopySessionResult>("copy_codex_session_to_account", {
+          sessionId: selectedSessionId,
+          targetAccountId: sessionTargetAccountId,
+        }),
+      "会话已复制到目标实例",
+    );
+    if (result.codexRunning) {
+      setSessionMessage("会话已复制；检测到 Codex 正在运行，重启后生效");
+    }
+  }
+
+  function requestDeleteSession(session: CodexSessionSummary) {
+    setSelectedSessionId(session.id);
+    setPendingDeleteSession(session);
+  }
+
+  async function refreshDeletedSessions() {
+    const nextDeletedSessions =
+      await callCommand<DeletedSessionEntry[]>("list_deleted_codex_sessions");
+    setDeletedSessions(nextDeletedSessions);
+    return nextDeletedSessions;
+  }
+
+  async function openDeletedSessions() {
+    await refreshDeletedSessions();
+    setShowDeletedSessions(true);
+  }
+
+  async function confirmDeleteSelectedSession() {
+    if (!pendingDeleteSession) return;
+    const deletingId = pendingDeleteSession.id;
+    const result = await runSession(
+      () =>
+        callCommand<DeleteSessionResult>("delete_codex_session", {
+          sessionId: deletingId,
+          confirmed: true,
+        }),
+      "会话已备份并删除",
+    );
+    setPendingDeleteSession(null);
+    if (result.codexRunning) {
+      setSessionMessage("会话已备份并删除；检测到 Codex 正在运行，重启后生效");
+    }
+    const nextSessions = await callCommand<CodexSessionList>("list_codex_sessions");
+    await refreshDeletedSessions();
+    setSessions(nextSessions);
+    setSelectedProjectPath((currentProjectPath) => {
+      const selectedStillExists = nextSessions.projects.some(
+        (project) => sessionProjectKey(project) === currentProjectPath,
+      );
+      return selectedStillExists
+        ? currentProjectPath
+        : nextSessions.projects[0]
+          ? sessionProjectKey(nextSessions.projects[0])
+          : "";
+    });
+    setSelectedSessionId((current) =>
+      current === deletingId ? nextSessions.sessions[0]?.id ?? "" : current,
+    );
+  }
+
+  async function confirmRestoreDeletedSessions() {
+    if (!pendingRestoreDeletion) return;
+    const result = await runSession(
+      () =>
+        callCommand<RestoreDeletedSessionsResult>("restore_deleted_codex_sessions", {
+          deletionId: pendingRestoreDeletion.id,
+          confirmed: true,
+        }),
+      "会话已还原",
+    );
+    setPendingRestoreDeletion(null);
+    if (result.codexRunning) {
+      setSessionMessage(
+        `已还原 ${result.restoredCount} 个会话；检测到 Codex 正在运行，重启后生效`,
+      );
+    }
+    const [nextSessions] = await Promise.all([
+      callCommand<CodexSessionList>("list_codex_sessions"),
+      refreshDeletedSessions(),
+    ]);
+    setSessions(nextSessions);
+    setSelectedProjectPath((currentProjectPath) => {
+      const selectedStillExists = nextSessions.projects.some(
+        (project) => sessionProjectKey(project) === currentProjectPath,
+      );
+      return selectedStillExists
+        ? currentProjectPath
+        : nextSessions.projects[0]
+          ? sessionProjectKey(nextSessions.projects[0])
+          : "";
+    });
+    setSelectedSessionId(nextSessions.projects[0]?.sessions[0]?.id ?? "");
+  }
+
   const currentProvider = config?.providers.find(
     (provider) => provider.id === config.currentProviderId,
   );
   const activeAccount = accounts?.accounts.find((account) => account.isActive);
   const activeUsage = activeAccount ? accountUsage[activeAccount.id] : undefined;
+
+  React.useEffect(() => {
+    void callCommand<void>("update_tray_usage_tooltip", {
+      accountEmail: activeAccount?.email ?? null,
+      sessionRemainingPercent:
+        activeUsage?.status === "ready" ? activeUsage.sessionRemainingPercent : null,
+      weeklyRemainingPercent:
+        activeUsage?.status === "ready" ? activeUsage.weeklyRemainingPercent : null,
+      proxyRunning: Boolean(status?.running),
+    }).catch(() => {});
+  }, [
+    activeAccount?.email,
+    activeUsage?.status,
+    activeUsage?.sessionRemainingPercent,
+    activeUsage?.weeklyRemainingPercent,
+    status?.running,
+  ]);
+
   const routeUrl = `http://127.0.0.1:${config?.proxyPort ?? 15721}/v1`;
   const draftIsSaved = Boolean(
     draft && config?.providers.some((provider) => provider.id === draft.id),
@@ -835,6 +1438,12 @@ function App() {
     (draft ?? currentProvider)?.apiFormat === "open_ai_chat" ? "聊天转换" : "响应直连";
   const officialFeatureLabel = authStatusLabel(chatGptAuth);
   const networkFeatureLabel = networkEnvLabel(networkEnv);
+  const selectedProject =
+    sessions?.projects.find((project) => sessionProjectKey(project) === selectedProjectPath) ??
+    sessions?.projects[0] ??
+    null;
+  const selectedSession = sessions?.sessions.find((session) => session.id === selectedSessionId);
+  const desktopRuntime = hasTauriRuntime();
 
   return (
     <main className="app-shell">
@@ -873,6 +1482,15 @@ function App() {
             type="button"
           >
             接入 API
+          </button>
+          <button
+            aria-selected={activeWorkspace === "sessions"}
+            className={activeWorkspace === "sessions" ? "active" : ""}
+            onClick={() => setActiveWorkspace("sessions")}
+            role="tab"
+            type="button"
+          >
+            会话管理
           </button>
         </nav>
 
@@ -1046,7 +1664,7 @@ function App() {
             </footer>
             {accountMessage && <p className="message">{accountMessage}</p>}
           </section>
-        ) : (
+        ) : activeWorkspace === "api" ? (
           <section className="workspace-panel api-panel" aria-label="接入 API">
             <section className="focus-strip api-focus">
               <span className="focus-kicker">当前服务商</span>
@@ -1234,14 +1852,299 @@ function App() {
             </footer>
             <p className="message api-message">{message || "\u00a0"}</p>
           </section>
+        ) : (
+          <section className="workspace-panel sessions-panel" aria-label="会话管理">
+            <section className="focus-strip session-focus">
+              <span className="focus-kicker">会话库</span>
+              <strong>{selectedSession?.title ?? "未选择会话"}</strong>
+              <span className={`run-pill ${sessions?.codexRunning ? "" : "on"}`}>
+                <span />
+                {sessions?.codexRunning ? "需重启" : "可管理"}
+              </span>
+            </section>
+
+            {sessions?.codexRunning && (
+              <p className="restart-warning">
+                <AlertTriangle size={14} />
+                Codex 正在运行，复制或删除会话后请重启 Codex。
+              </p>
+            )}
+            {!desktopRuntime && (
+              <p className="restart-warning">
+                <AlertTriangle size={14} />
+                浏览器预览无法读取真实会话，请在 CodexPilot 桌面窗口查看。
+              </p>
+            )}
+
+            <section className="toolbar-line session-toolbar" aria-label="会话操作">
+              <button
+                className={`icon-button ${refreshing ? "is-loading" : ""}`}
+                disabled={busy || refreshing}
+                onClick={() => void refreshApp("sessions")}
+                title={refreshing ? "刷新中" : "刷新会话"}
+                type="button"
+              >
+                <RefreshCw size={17} />
+              </button>
+              <button
+                className="soft-button"
+                disabled={busy || !selectedSession}
+                onClick={openSelectedSession}
+                type="button"
+              >
+                <Eye size={16} />
+                打开
+              </button>
+              <select
+                aria-label="复制目标实例"
+                disabled={busy || !sessionTargetAccounts.length}
+                value={sessionTargetAccountId}
+                onChange={(event) => setSessionTargetAccountId(event.currentTarget.value)}
+              >
+                {sessionTargetAccounts.length ? (
+                  sessionTargetAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.email || formatWorkspaceLabel(account.workspaceLabel)}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">暂无其他实例</option>
+                )}
+              </select>
+              <button
+                className="soft-button"
+                disabled={busy || !selectedSession || !sessionTargetAccountId}
+                onClick={copySelectedSession}
+                type="button"
+              >
+                <Copy size={16} />
+                复制
+              </button>
+            </section>
+
+            <section className="session-grid" aria-label="会话目录和内容">
+              <section className="compact-list session-directory" aria-label="项目目录">
+                {sessions?.projects.length ? (
+                  sessions.projects.map((project) => {
+                    const projectKey = sessionProjectKey(project);
+                    const active = selectedProject
+                      ? sessionProjectKey(selectedProject) === projectKey
+                      : false;
+                    return (
+                      <button
+                        className={`session-project-row ${active ? "active" : ""}`}
+                        disabled={busy}
+                        key={projectKey}
+                        onClick={() => {
+                          setSelectedProjectPath(projectKey);
+                          setSelectedSessionId(project.sessions[0]?.id ?? "");
+                        }}
+                        type="button"
+                      >
+                        <span className="session-project-icon">
+                          <Folder size={14} />
+                        </span>
+                        <span className="session-project-copy">
+                          <strong>{project.projectName}</strong>
+                          <small>{project.sessions.length} 个会话</small>
+                        </span>
+                      </button>
+                    );
+                  })
+                ) : (
+                  <p className="empty">
+                    {desktopRuntime
+                      ? "还没有扫描到 Codex 会话。"
+                      : "浏览器预览不加载本机会话数据。"}
+                  </p>
+                )}
+              </section>
+              <section className="compact-list session-content" aria-label="目录内容">
+                {selectedProject ? (
+                  <>
+                    <header className="session-content-header">
+                      <span className="session-content-title">
+                        <strong>{selectedProject.projectName}</strong>
+                        <span>{selectedProject.projectPath || "未指定目录"}</span>
+                      </span>
+                    </header>
+                    <div className="session-content-list">
+                      {selectedProject.sessions.length ? (
+                        selectedProject.sessions.map((session) => (
+                          <article
+                            className={`session-row ${
+                              session.id === selectedSessionId ? "active" : ""
+                            }`}
+                            key={session.id}
+                          >
+                            <button
+                              className="session-row-main"
+                              disabled={busy}
+                              onClick={() => setSelectedSessionId(session.id)}
+                              type="button"
+                            >
+                              <span className="session-icon">
+                                <FileText size={15} />
+                              </span>
+                              <span className="session-copy">
+                                <strong>{session.title}</strong>
+                                <small>{formatSessionTime(session.updatedAt)}</small>
+                              </span>
+                            </button>
+                            <button
+                              className="session-delete-button"
+                              disabled={busy}
+                              onClick={() => requestDeleteSession(session)}
+                              title="删除会话"
+                              type="button"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </article>
+                        ))
+                      ) : (
+                        <p className="empty">暂无对话。</p>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <p className="empty">选择左侧目录查看会话。</p>
+                )}
+              </section>
+            </section>
+
+            <footer className="workspace-footer">
+              <span>删除会话前自动备份到 ~/.codex/backups/sessions</span>
+              <button
+                className="recent-deleted-button"
+                disabled={busy}
+                onClick={openDeletedSessions}
+                type="button"
+              >
+                <RotateCcw size={14} />
+                最近删除{deletedSessions.length ? ` ${deletedSessions.length}` : ""}
+              </button>
+            </footer>
+            <p className="message session-message">{sessionMessage || "\u00a0"}</p>
+          </section>
+        )}
+
+        {pendingDeleteSession && (
+          <div className="confirm-backdrop" role="presentation">
+            <section className="confirm-sheet" aria-label="确认删除会话" role="dialog">
+              <button
+                className="confirm-close"
+                disabled={busy}
+                onClick={() => setPendingDeleteSession(null)}
+                title="取消"
+                type="button"
+              >
+                <X size={16} />
+              </button>
+              <strong>删除这个会话？</strong>
+              <span>{pendingDeleteSession.title}</span>
+              <p>删除前会自动备份到 ~/.codex/backups/sessions，不能一键清空全部会话。</p>
+              <div>
+                <button disabled={busy} onClick={() => setPendingDeleteSession(null)} type="button">
+                  取消
+                </button>
+                <button
+                  className="danger-confirm"
+                  disabled={busy}
+                  onClick={confirmDeleteSelectedSession}
+                  type="button"
+                >
+                  备份并删除
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {showDeletedSessions && (
+          <div className="confirm-backdrop" role="presentation">
+            <section className="confirm-sheet deleted-sheet" aria-label="最近删除" role="dialog">
+              <button
+                className="confirm-close"
+                disabled={busy}
+                onClick={() => setShowDeletedSessions(false)}
+                title="关闭"
+                type="button"
+              >
+                <X size={16} />
+              </button>
+              <strong>最近删除</strong>
+              <span>可还原已备份的 Codex 会话</span>
+              <div className="deleted-list">
+                {deletedSessions.length ? (
+                  deletedSessions.map((entry) => (
+                    <article className="deleted-row" key={entry.id}>
+                      <span>
+                        <strong>{entry.name}</strong>
+                        <small>
+                          {entry.kind === "project" ? "项目" : "会话"} · {entry.sessions.length} 个 ·{" "}
+                          {formatSessionTime(entry.deletedAt)}
+                        </small>
+                      </span>
+                      <button
+                        disabled={busy}
+                        onClick={() => setPendingRestoreDeletion(entry)}
+                        type="button"
+                      >
+                        还原
+                      </button>
+                    </article>
+                  ))
+                ) : (
+                  <p className="empty">暂无可还原的会话。</p>
+                )}
+              </div>
+            </section>
+          </div>
+        )}
+
+        {pendingRestoreDeletion && (
+          <div className="confirm-backdrop" role="presentation">
+            <section className="confirm-sheet" aria-label="确认还原会话" role="dialog">
+              <button
+                className="confirm-close"
+                disabled={busy}
+                onClick={() => setPendingRestoreDeletion(null)}
+                title="取消"
+                type="button"
+              >
+                <X size={16} />
+              </button>
+              <strong>还原这条删除记录？</strong>
+              <span>{pendingRestoreDeletion.name}</span>
+              <p>
+                将恢复 {pendingRestoreDeletion.sessions.length} 个会话文件，并把 Codex 索引改回可见。
+              </p>
+              <div>
+                <button disabled={busy} onClick={() => setPendingRestoreDeletion(null)} type="button">
+                  取消
+                </button>
+                <button
+                  className="danger-confirm"
+                  disabled={busy}
+                  onClick={confirmRestoreDeletedSessions}
+                  type="button"
+                >
+                  确认还原
+                </button>
+              </div>
+            </section>
+          </div>
         )}
       </section>
     </main>
   );
 }
 
+const isUsageBubbleView = new URLSearchParams(window.location.search).get("view") === "usage-bubble";
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    {isUsageBubbleView ? <UsageBubbleApp /> : <App />}
   </React.StrictMode>,
 );
