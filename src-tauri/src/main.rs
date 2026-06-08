@@ -8,7 +8,7 @@ use codex_api_switcher::{
 };
 use std::process::Command;
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, State, WindowEvent,
+    AppHandle, Emitter, Manager, State, WindowEvent,
     image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -360,20 +360,6 @@ fn hide_main_window(app: &AppHandle) {
     }
 }
 
-fn show_usage_bubble_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(USAGE_BUBBLE_WINDOW_LABEL) {
-        if let Ok(position) = app.cursor_position() {
-            let x = (position.x.round() as i32 - 215).max(8);
-            let y = (position.y.round() as i32 + 10).max(8);
-            let _ = window.set_position(PhysicalPosition::new(x, y));
-        }
-        let _ = app.emit(SHOW_USAGE_BUBBLE_EVENT, ());
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
-
 fn hide_usage_bubble_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(USAGE_BUBBLE_WINDOW_LABEL) {
         let _ = window.hide();
@@ -403,8 +389,6 @@ fn setup_system_tray(app: &mut tauri::App) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
-    let usage_item =
-        MenuItem::with_id(app, "show-usage-bubble", "显示额度气泡", true, None::<&str>)?;
     let hide_item = MenuItem::with_id(app, "hide-main-window", "隐藏窗口", true, None::<&str>)?;
     let open_home_item = MenuItem::with_id(
         app,
@@ -414,16 +398,7 @@ fn setup_system_tray(app: &mut tauri::App) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit_item = MenuItem::with_id(app, "quit-codexpilot", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &show_item,
-            &usage_item,
-            &hide_item,
-            &open_home_item,
-            &quit_item,
-        ],
-    )?;
+    let menu = Menu::with_items(app, &[&show_item, &hide_item, &open_home_item, &quit_item])?;
     let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
 
     TrayIconBuilder::with_id(TRAY_ID)
@@ -434,7 +409,6 @@ fn setup_system_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show-main-window" => show_main_window(app),
-            "show-usage-bubble" => show_usage_bubble_window(app),
             "hide-main-window" => hide_main_window(app),
             "open-codex-home" => {
                 let _ = open_codex_home();

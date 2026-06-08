@@ -58,14 +58,14 @@ fn desktop_shell_creates_real_system_tray() {
 }
 
 #[test]
-fn tray_usage_bubble_opens_accounts_usage_view() {
+fn tray_menu_omits_manual_usage_bubble_entry() {
     let main_rs = include_str!("../src/main.rs");
     let renderer = include_str!("../../src/main.tsx");
 
-    assert!(main_rs.contains("show-usage-bubble"));
+    assert!(!main_rs.contains("\"显示额度气泡\""));
+    assert!(!main_rs.contains("MenuItem::with_id(app, \"show-usage-bubble\""));
     assert!(main_rs.contains("codexpilot://show-usage-bubble"));
     assert!(main_rs.contains("USAGE_BUBBLE_WINDOW_LABEL"));
-    assert!(main_rs.contains("show_usage_bubble_window"));
     assert!(renderer.contains("listen(\"codexpilot://show-usage-bubble\""));
     assert!(renderer.contains("UsageBubbleApp"));
     assert!(renderer.contains("usage-bubble-quota-row"));
